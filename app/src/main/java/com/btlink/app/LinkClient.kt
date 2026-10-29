@@ -39,7 +39,6 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
-import android.graphics.BitmapFactory
 
 sealed class ClientState {
     object Idle : ClientState()

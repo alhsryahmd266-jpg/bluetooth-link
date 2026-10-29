@@ -24,7 +24,6 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.provider.Settings
 import android.content.pm.ServiceInfo
-import android.graphics.Bitmap
 import android.os.Bundle
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pManager
@@ -53,9 +52,6 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
-import java.io.ByteArrayOutputStream
-import java.io.DataInputStream
-import java.io.DataOutputStream
 import kotlin.concurrent.thread
 
 class LinkService : Service() {
