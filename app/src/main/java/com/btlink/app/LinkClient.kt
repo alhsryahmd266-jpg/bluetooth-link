@@ -7,11 +7,18 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
+import android.net.wifi.WifiNetworkSpecifier
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.LruCache
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -29,6 +36,9 @@ import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.IOException
 import java.io.OutputStream
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 
 sealed class ClientState {
     object Idle : ClientState()
@@ -53,6 +63,9 @@ object LinkClient {
     val transfer = MutableStateFlow<Transfer?>(null)
     val queued = MutableStateFlow(0)
     val completed = MutableStateFlow<Set<String>>(emptySet())
+    val turbo = MutableStateFlow(false)
+    val upgrading = MutableStateFlow(false)
+    val wifiMsg = MutableStateFlow<String?>(null)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lock = Mutex()
@@ -60,6 +73,9 @@ object LinkClient {
     @Volatile private var socket: BluetoothSocket? = null
     @Volatile private var inp: DataInputStream? = null
     @Volatile private var out: DataOutputStream? = null
+    @Volatile private var tcp: Socket? = null
+    @Volatile private var netCm: ConnectivityManager? = null
+    @Volatile private var netCb: ConnectivityManager.NetworkCallback? = null
 
     private val thumbs = object : LruCache<String, Bitmap>(24 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
@@ -75,6 +91,7 @@ object LinkClient {
                     } catch (_: Exception) {
                     }
                 }
+                upgrade(app)
             }
         }
     }
@@ -112,6 +129,81 @@ object LinkClient {
         }
     }
 
+    fun upgradeAsync(ctx: Context) {
+        val app = ctx.applicationContext
+        scope.launch { upgrade(app) }
+    }
+
+    /** Switch the data channel from Bluetooth to Wi-Fi Direct (much faster). Falls back silently to Bluetooth. */
+    private suspend fun upgrade(ctx: Context): Boolean = withContext(Dispatchers.IO) {
+        if (turbo.value || upgrading.value || state.value !is ClientState.Connected) return@withContext false
+        upgrading.value = true
+        wifiMsg.value = null
+        var cb: ConnectivityManager.NetworkCallback? = null
+        val cm = ctx.getSystemService(ConnectivityManager::class.java)
+        try {
+            val info = call { i, o ->
+                o.writeInt(P.UPGRADE); o.flush()
+                if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
+                Triple(i.readUTF(), i.readUTF(), i.readInt())
+            }
+            val (ssid, pass, port) = info
+
+            val spec = WifiNetworkSpecifier.Builder().setSsid(ssid).setWpa2Passphrase(pass).build()
+            val req = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .setNetworkSpecifier(spec).build()
+            val avail = CompletableDeferred<Network?>()
+            cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) { avail.complete(network) }
+                override fun onUnavailable() { avail.complete(null) }
+            }
+            cm.requestNetwork(req, cb, 30_000)
+            val net = avail.await() ?: throw RemoteError("لم يتم الاتصال بشبكة الواي فاي المباشرة (تأكد من تشغيل الواي فاي ووافق على النافذة)")
+
+            var host: InetAddress? = null
+            for (k in 1..10) {
+                host = cm.getLinkProperties(net)?.dhcpServerAddress
+                if (host != null) break
+                delay(300)
+            }
+            val target = host ?: InetAddress.getByName("192.168.49.1")
+            var sock: Socket? = null
+            for (k in 1..8) {
+                try {
+                    val s = net.socketFactory.createSocket()
+                    s.connect(InetSocketAddress(target, port), 4000)
+                    sock = s
+                    break
+                } catch (_: Exception) {
+                    delay(600)
+                }
+            }
+            val s = sock ?: throw RemoteError("تعذر فتح قناة السرعة العالية")
+            s.tcpNoDelay = true
+            try { s.receiveBufferSize = 1 shl 20 } catch (_: Exception) {}
+            val ti = DataInputStream(BufferedInputStream(s.getInputStream(), P.BUF))
+            val to = DataOutputStream(BufferedOutputStream(s.getOutputStream(), P.BUF))
+            lock.withLock {
+                if (state.value is ClientState.Connected) {
+                    inp = ti; out = to; tcp = s
+                    netCm = cm; netCb = cb
+                    turbo.value = true
+                } else {
+                    try { s.close() } catch (_: Exception) {}
+                }
+            }
+            turbo.value
+        } catch (e: Exception) {
+            try { cb?.let { cm.unregisterNetworkCallback(it) } } catch (_: Exception) {}
+            wifiMsg.value = (e as? RemoteError)?.message ?: "تعذر تفعيل الوضع السريع، التطبيق شغال عبر البلوتوث"
+            false
+        } finally {
+            upgrading.value = false
+        }
+    }
+
     fun disconnect() {
         scope.launch(Dispatchers.IO) {
             try { out?.let { it.writeInt(P.BYE); it.flush() } } catch (_: Exception) {}
@@ -120,7 +212,11 @@ object LinkClient {
     }
 
     private fun drop(msg: String?) {
+        try { tcp?.close() } catch (_: Exception) {}
         try { socket?.close() } catch (_: Exception) {}
+        try { netCb?.let { netCm?.unregisterNetworkCallback(it) } } catch (_: Exception) {}
+        tcp = null; netCb = null; netCm = null
+        turbo.value = false; upgrading.value = false
         socket = null; inp = null; out = null
         state.value = if (msg == null) ClientState.Idle else ClientState.Failed(msg)
     }

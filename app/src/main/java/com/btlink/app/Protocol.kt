@@ -12,10 +12,11 @@ object P {
     const val PULL_FILE = 5
     const val PULL_MEDIA = 6
     const val CONTACTS = 7
+    const val UPGRADE = 8
     const val BYE = 9
     const val OK = 0
     const val ERR = 1
-    const val BUF = 64 * 1024
+    const val BUF = 256 * 1024
 }
 
 sealed class ServerState {

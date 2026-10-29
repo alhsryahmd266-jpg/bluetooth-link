@@ -121,6 +121,7 @@ enum class Screen { Home, Main, Receiver }
 
 fun neededPerms(): List<String> = buildList {
     if (Build.VERSION.SDK_INT >= 31) add(Manifest.permission.BLUETOOTH_CONNECT)
+    if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.NEARBY_WIFI_DEVICES) else add(Manifest.permission.ACCESS_FINE_LOCATION)
     if (Build.VERSION.SDK_INT >= 33) {
         add(Manifest.permission.POST_NOTIFICATIONS)
         add(Manifest.permission.READ_MEDIA_IMAGES)
@@ -449,6 +450,10 @@ fun StatusLine(text: String, color: Color, spinner: Boolean) {
 @Composable
 fun Browser(name: String, back: () -> Unit) {
     var tab by remember { mutableIntStateOf(0) }
+    val ctx = LocalContext.current
+    val turbo by LinkClient.turbo.collectAsState()
+    val upg by LinkClient.upgrading.collectAsState()
+    val wmsg by LinkClient.wifiMsg.collectAsState()
     val titles = listOf("صور", "فيديو", "صوت", "ملفات", "جهات")
     val icons = listOf(Icons.Rounded.ImageIcon, Icons.Rounded.Videocam, Icons.Rounded.MusicNote, Icons.Rounded.Folder, Icons.Rounded.Contacts)
 
@@ -464,6 +469,21 @@ fun Browser(name: String, back: () -> Unit) {
             Spacer(Modifier.width(6.dp))
             Text("متصل ببلوتوث · $name", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             TextButton(onClick = { LinkClient.disconnect() }) { Text("قطع", color = CRed, fontWeight = FontWeight.Bold) }
+        }
+        Row(
+            Modifier.fillMaxWidth().background(if (turbo) CGreen.copy(alpha = 0.08f) else CCard).padding(horizontal = 14.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (upg) { CircularProgressIndicator(Modifier.size(16.dp), color = CCyan, strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)) }
+            Text(
+                when {
+                    turbo -> "⚡ الوضع السريع شغال (Wi-Fi Direct)"
+                    upg -> "جاري تفعيل الوضع السريع… وافق على نافذة الواي فاي لو ظهرت"
+                    else -> wmsg ?: "الاتصال حالياً عبر البلوتوث (أبطأ)"
+                },
+                color = if (turbo) CGreen else CDim, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.weight(1f)
+            )
+            if (!turbo && !upg) TextButton(onClick = { LinkClient.upgradeAsync(ctx) }) { Text("تفعيل السريع", fontSize = 12.sp, color = CCyan) }
         }
         TabRow(selectedTabIndex = tab, containerColor = Color.Transparent, contentColor = CCyan) {
             titles.forEachIndexed { i, t ->

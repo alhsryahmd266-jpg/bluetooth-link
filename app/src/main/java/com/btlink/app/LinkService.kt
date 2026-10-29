@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.annotation.SuppressLint
 import android.app.Service
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothServerSocket
@@ -14,7 +15,10 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.os.Bundle
+import android.net.wifi.p2p.WifiP2pConfig
+import android.net.wifi.p2p.WifiP2pManager
 import android.os.Environment
+import android.os.Looper
 import android.os.IBinder
 import android.provider.ContactsContract
 import android.provider.MediaStore
@@ -34,6 +38,8 @@ import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.File
 import java.io.InputStream
+import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -60,6 +66,9 @@ class LinkService : Service() {
     private var serverSocket: BluetoothServerSocket? = null
     @Volatile private var active: BluetoothSocket? = null
     @Volatile private var decision: CompletableFuture<Boolean>? = null
+    private var p2pCh: WifiP2pManager.Channel? = null
+    private var tcpServer: ServerSocket? = null
+    @Volatile private var tcp: Socket? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -194,6 +203,7 @@ class LinkService : Service() {
         decision?.complete(false)
         try { serverSocket?.close() } catch (_: Exception) {}
         try { active?.close() } catch (_: Exception) {}
+        cleanupWifi()
         Hub.server.value = ServerState.Off
     }
 
@@ -219,6 +229,7 @@ class LinkService : Service() {
         } catch (_: Exception) {
         } finally {
             try { s.close() } catch (_: Exception) {}
+            cleanupWifi()
             active = null
             nm.cancel(NID_REQ)
             Hub.server.value = if (listening) ServerState.Listening else ServerState.Off
@@ -234,10 +245,79 @@ class LinkService : Service() {
                 P.PULL_FILE -> pullFile(inp.readUTF(), out)
                 P.PULL_MEDIA -> pullMedia(inp.readInt(), inp.readLong(), out)
                 P.CONTACTS -> contacts(out)
+                P.UPGRADE -> upgrade(out)
                 else -> return
             }
             out.flush()
         }
+    }
+
+    private fun cleanupWifi() {
+        try { tcp?.close() } catch (_: Exception) {}
+        try { tcpServer?.close() } catch (_: Exception) {}
+        tcp = null; tcpServer = null
+        try {
+            val wp = getSystemService(WifiP2pManager::class.java)
+            val ch = p2pCh
+            if (wp != null && ch != null) wp.removeGroup(ch, null)
+        } catch (_: Exception) {}
+    }
+
+    private fun listener(f: CompletableFuture<Boolean>) = object : WifiP2pManager.ActionListener {
+        override fun onSuccess() { f.complete(true) }
+        override fun onFailure(reason: Int) { f.complete(false) }
+    }
+
+    /** Create a Wi-Fi Direct group (5GHz when possible) + a TCP server; client then joins and streams over Wi-Fi. */
+    @SuppressLint("MissingPermission")
+    private fun upgrade(out: DataOutputStream) {
+        cleanupWifi()
+        val wp = getSystemService(WifiP2pManager::class.java)
+        if (wp == null) { err(out, "الواي فاي دايركت غير مدعوم على الهاتف المستقبل"); return }
+        val chars = "abcdefghjkmnpqrstuvwxyz23456789"
+        fun rnd(n: Int) = (1..n).map { chars.random() }.joinToString("")
+        val ssid = "DIRECT-bl-" + rnd(5)
+        val pass = rnd(12)
+        var ok = false
+        try {
+            val ch = p2pCh ?: wp.initialize(this, Looper.getMainLooper(), null).also { p2pCh = it }
+            val rm = CompletableFuture<Boolean>()
+            wp.removeGroup(ch, listener(rm))
+            try { rm.get(3, TimeUnit.SECONDS) } catch (_: Exception) {}
+            for (band in intArrayOf(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ, WifiP2pConfig.GROUP_OWNER_BAND_AUTO)) {
+                val cfg = WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(pass).setGroupOperatingBand(band).build()
+                val f = CompletableFuture<Boolean>()
+                wp.createGroup(ch, cfg, listener(f))
+                ok = try { f.get(12, TimeUnit.SECONDS) } catch (_: Exception) { false }
+                if (ok) break
+                val rm2 = CompletableFuture<Boolean>()
+                wp.removeGroup(ch, listener(rm2))
+                try { rm2.get(3, TimeUnit.SECONDS) } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {
+            ok = false
+        }
+        if (!ok) { err(out, "تعذر تشغيل Wi-Fi Direct على الهاتف المستقبل (شغّل الواي فاي وامنح الأذونات)"); return }
+
+        val ss = ServerSocket(0)
+        tcpServer = ss
+        thread(name = "bt-tcp") {
+            try {
+                ss.soTimeout = 45_000
+                val s = ss.accept()
+                try { ss.close() } catch (_: Exception) {}
+                s.tcpNoDelay = true
+                tcp = s
+                serve(
+                    DataInputStream(BufferedInputStream(s.getInputStream(), P.BUF)),
+                    DataOutputStream(BufferedOutputStream(s.getOutputStream(), P.BUF))
+                )
+            } catch (_: Exception) {
+            } finally {
+                try { tcp?.close() } catch (_: Exception) {}
+            }
+        }
+        out.writeInt(P.OK); out.writeUTF(ssid); out.writeUTF(pass); out.writeInt(ss.localPort)
     }
 
     private fun err(out: DataOutputStream, msg: String) {
