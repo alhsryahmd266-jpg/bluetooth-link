@@ -41,6 +41,37 @@ jobs:
             --title "Bluetooth Link (latest)" \
             --notes "Latest build of Bluetooth Link. Download BluetoothLink.apk and install it on both phones."
 
+      - name: Publish download page (GitHub Pages)
+        if: success()
+        run: |
+          mkdir site
+          cp BluetoothLink.apk site/BluetoothLink.apk
+          cat > site/index.html <<'HTML'
+          <!doctype html>
+          <html lang="ar" dir="rtl"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Bluetooth Link</title>
+          <style>
+          body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#070b14;color:#fff;font-family:system-ui,sans-serif;text-align:center}
+          .c{padding:24px;max-width:420px}
+          a.b{display:block;margin-top:24px;padding:18px;border-radius:16px;background:linear-gradient(135deg,#22d3ee,#6366f1);color:#fff;font-size:20px;font-weight:700;text-decoration:none}
+          p{color:#8b9bb8;line-height:1.7}
+          </style></head><body><div class="c">
+          <h1>Bluetooth Link</h1>
+          <p>جاري تنزيل التطبيق... لو ما بدأش التنزيل اضغط الزر.</p>
+          <a class="b" href="BluetoothLink.apk" download>تنزيل التطبيق (APK)</a>
+          </div>
+          <script>setTimeout(function(){location.href='BluetoothLink.apk'},800)</script>
+          </body></html>
+          HTML
+          cd site
+          touch .nojekyll
+          git init -q -b gh-pages
+          git config user.name "ci"; git config user.email "ci@example.com"
+          git add -A
+          git commit -qm "site"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" gh-pages
+
       - name: Save build log on failure
         if: failure()
         run: |
