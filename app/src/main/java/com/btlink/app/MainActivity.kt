@@ -43,6 +43,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -384,12 +390,18 @@ fun StatusLine(text: String, color: Color, spinner: Boolean) {
 @Composable
 fun Browser(name: String, back: () -> Unit) {
     var tab by remember { mutableIntStateOf(0) }
+    var controlOpen by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
     val turbo by LinkClient.turbo.collectAsState()
     val upg by LinkClient.upgrading.collectAsState()
     val wmsg by LinkClient.wifiMsg.collectAsState()
-    val titles = listOf("صور", "فيديو", "صوت", "ملفات", "جهات")
-    val icons = listOf(Icons.Rounded.ImageIcon, Icons.Rounded.Videocam, Icons.Rounded.MusicNote, Icons.Rounded.Folder, Icons.Rounded.Contacts)
+    val titles = listOf("صور", "فيديو", "صوت", "ملفات", "تطبيقات", "جهات")
+    val icons = listOf(Icons.Rounded.ImageIcon, Icons.Rounded.Videocam, Icons.Rounded.MusicNote, Icons.Rounded.Folder, Icons.Rounded.Apps, Icons.Rounded.Contacts)
+
+    if (controlOpen) {
+        RemoteControlScreen { controlOpen = false }
+        return
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -419,6 +431,14 @@ fun Browser(name: String, back: () -> Unit) {
             )
             if (!turbo && !upg) TextButton(onClick = { LinkClient.upgradeAsync(ctx) }) { Text("تفعيل السريع", fontSize = 12.sp, color = CCyan) }
         }
+        if (turbo) {
+            Button(
+                onClick = { controlOpen = true },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp).height(46.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = CIndigo)
+            ) { Icon(Icons.Rounded.PhoneAndroid, null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("تحكم كامل في الهاتف (شاشة + لمس)", fontWeight = FontWeight.Bold) }
+        }
         TabRow(selectedTabIndex = tab, containerColor = Color.Transparent, contentColor = CCyan) {
             titles.forEachIndexed { i, t ->
                 Tab(selected = tab == i, onClick = { tab = i }, icon = { Icon(icons[i], null, modifier = Modifier.size(22.dp)) }, text = { Text(t, fontSize = 12.sp) })
@@ -430,10 +450,132 @@ fun Browser(name: String, back: () -> Unit) {
                 1 -> MediaTab(1)
                 2 -> MediaTab(2)
                 3 -> FilesTab()
+                4 -> AppsTab()
                 else -> ContactsTab()
             }
         }
         TransferBar()
+    }
+}
+
+@Composable
+fun AppsTab() {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val apps by LinkClient.appsList.collectAsState()
+    var confirmUninstall by remember { mutableStateOf<RemoteApp?>(null) }
+    var busyPkg by remember { mutableStateOf<String?>(null) }
+    var msg by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) { if (apps == null) LinkClient.loadApps() }
+
+    val list = apps
+    when {
+        list == null -> Loading()
+        list.isEmpty() -> Msg("تعذر عرض التطبيقات")
+        else -> Column(Modifier.fillMaxSize()) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)) {
+                Text("${list.size} تطبيق مثبت على الهاتف التاني", color = CDim, fontSize = 13.sp)
+            }
+            msg?.let { Text(it, color = CRed, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 14.dp)) }
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(list, key = { it.pkg }) { a ->
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(CCard), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Rounded.Apps, null, tint = CCyan)
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(a.label, color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(a.pkg, color = CDim, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        if (busyPkg == a.pkg) {
+                            CircularProgressIndicator(Modifier.size(18.dp), color = CCyan, strokeWidth = 2.dp)
+                        } else {
+                            IconButton(onClick = {
+                                scope.launch {
+                                    busyPkg = a.pkg
+                                    try { LinkClient.launchApp(a.pkg) } catch (e: Exception) { msg = e.message }
+                                    busyPkg = null
+                                }
+                            }) { Icon(Icons.Rounded.PlayArrow, null, tint = CGreen) }
+                            if (!a.system) IconButton(onClick = { confirmUninstall = a }) { Icon(Icons.Rounded.Close, null, tint = CRed) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    confirmUninstall?.let { a ->
+        AlertDialog(
+            onDismissRequest = { confirmUninstall = null }, containerColor = CSurf,
+            title = { Text("حذف ${a.label}؟", color = Color.White) },
+            text = { Text("هتظهر نافذة تأكيد على شاشة الهاتف التاني نفسه، لازم تتحكم فيها من شاشة التحكم الكامل.", color = CDim) },
+            confirmButton = { Button(onClick = {
+                val pkg = a.pkg; confirmUninstall = null
+                scope.launch { try { LinkClient.uninstallApp(pkg); LinkClient.loadApps() } catch (e: Exception) { msg = e.message } }
+            }, colors = ButtonDefaults.buttonColors(containerColor = CRed)) { Text("حذف") } },
+            dismissButton = { TextButton(onClick = { confirmUninstall = null }) { Text("إلغاء") } }
+        )
+    }
+}
+
+@Composable
+fun RemoteControlScreen(back: () -> Unit) {
+    val ctx = LocalContext.current
+    val frame by LinkClient.mirrorFrame.collectAsState()
+    val err by LinkClient.mirrorError.collectAsState()
+    var start by remember { mutableStateOf<Offset?>(null) }
+    var boxSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+
+    LaunchedEffect(Unit) { LinkClient.startMirror(ctx) }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { LinkClient.stopMirror() } }
+
+    Column(Modifier.fillMaxSize().background(Color.Black)) {
+        Row(Modifier.fillMaxWidth().background(CSurf).padding(horizontal = 6.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = back) { Icon(Icons.Rounded.ArrowBack, null, tint = Color.White) }
+            Text("تحكم كامل", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            TextButton(onClick = { LinkClient.sendKey(1) }) { Text("رجوع", color = CCyan, fontSize = 13.sp) }
+            TextButton(onClick = { LinkClient.sendKey(2) }) { Text("الرئيسية", color = CCyan, fontSize = 13.sp) }
+            TextButton(onClick = { LinkClient.sendKey(3) }) { Text("الأخيرة", color = CCyan, fontSize = 13.sp) }
+        }
+        Box(
+            Modifier.weight(1f).fillMaxWidth()
+                .onSizeChanged { boxSize = it }
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        start = down.position
+                        var last = down.position
+                        var moved = false
+                        do {
+                            val ev = awaitPointerEvent()
+                            val c = ev.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!c.pressed) { last = c.position; break }
+                            last = c.position
+                            if ((last - down.position).getDistance() > 12f) moved = true
+                        } while (true)
+                        val w = boxSize.width.toFloat().coerceAtLeast(1f)
+                        val h = boxSize.height.toFloat().coerceAtLeast(1f)
+                        val nx1 = (down.position.x / w).coerceIn(0f, 1f); val ny1 = (down.position.y / h).coerceIn(0f, 1f)
+                        if (!moved) {
+                            LinkClient.sendTap(nx1, ny1)
+                        } else {
+                            val nx2 = (last.x / w).coerceIn(0f, 1f); val ny2 = (last.y / h).coerceIn(0f, 1f)
+                            LinkClient.sendSwipe(nx1, ny1, nx2, ny2, 220)
+                        }
+                        start = null
+                    }
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            val bmp = frame
+            when {
+                bmp != null -> Image(bmp.asImageBitmap(), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+                err != null -> Msg(err!!)
+                else -> Loading()
+            }
+        }
     }
 }
 

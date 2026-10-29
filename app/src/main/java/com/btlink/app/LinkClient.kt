@@ -39,6 +39,7 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import android.graphics.BitmapFactory
 
 sealed class ClientState {
     object Idle : ClientState()
@@ -76,6 +77,17 @@ object LinkClient {
     @Volatile private var tcp: Socket? = null
     @Volatile private var netCm: ConnectivityManager? = null
     @Volatile private var netCb: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var activeNet: Network? = null
+    @Volatile private var hostAddr: InetAddress? = null
+
+    val mirrorFrame = MutableStateFlow<Bitmap?>(null)
+    val mirrorActive = MutableStateFlow(false)
+    val mirrorError = MutableStateFlow<String?>(null)
+    val appsList = MutableStateFlow<List<RemoteApp>?>(null)
+    @Volatile private var mirrorFrameSocket: Socket? = null
+    @Volatile private var mirrorInputSocket: Socket? = null
+    @Volatile private var mirrorOutStream: DataOutputStream? = null
+    @Volatile private var mirrorStop = false
 
     private val thumbs = object : LruCache<String, Bitmap>(24 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
@@ -204,6 +216,7 @@ object LinkClient {
                 if (state.value is ClientState.Connected) {
                     inp = ti; out = to; tcp = s
                     netCm = cm; netCb = cb
+                    activeNet = net; hostAddr = target
                     turbo.value = true
                 } else {
                     try { s.close() } catch (_: Exception) {}
@@ -219,6 +232,93 @@ object LinkClient {
         }
     }
 
+    fun startMirror(ctx: Context) {
+        if (mirrorActive.value) return
+        mirrorError.value = null
+        scope.launch(Dispatchers.IO) {
+            try {
+                val (port, rw_, rh) = call { i, o ->
+                    o.writeInt(P.MIRROR); o.flush()
+                    if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
+                    Triple(i.readInt(), i.readInt(), i.readInt())
+                }
+                val net = activeNet ?: throw RemoteError("فعّل الوضع السريع أولاً")
+                val host = hostAddr ?: throw RemoteError("فعّل الوضع السريع أولاً")
+                val fs = net.socketFactory.createSocket(); fs.connect(InetSocketAddress(host, port), 5000); fs.tcpNoDelay = true
+                val ins = net.socketFactory.createSocket(); ins.connect(InetSocketAddress(host, port), 5000); ins.tcpNoDelay = true
+                mirrorFrameSocket = fs; mirrorInputSocket = ins
+                mirrorOutStream = DataOutputStream(BufferedOutputStream(ins.getOutputStream(), 8192))
+                mirrorStop = false
+                mirrorActive.value = true
+                val fi = DataInputStream(BufferedInputStream(fs.getInputStream(), 256 * 1024))
+                while (!mirrorStop) {
+                    val n = fi.readInt()
+                    val buf = ByteArray(n)
+                    fi.readFully(buf)
+                    val bmp = BitmapFactory.decodeByteArray(buf, 0, buf.size)
+                    if (bmp != null) mirrorFrame.value = bmp
+                }
+            } catch (e: Exception) {
+                mirrorError.value = (e as? RemoteError)?.message ?: "فشل الاتصال بشاشة الهاتف الآخر"
+            } finally {
+                mirrorActive.value = false
+                try { mirrorFrameSocket?.close() } catch (_: Exception) {}
+                try { mirrorInputSocket?.close() } catch (_: Exception) {}
+                mirrorFrameSocket = null; mirrorInputSocket = null; mirrorOutStream = null
+            }
+        }
+    }
+
+    fun stopMirror() {
+        mirrorStop = true
+        try { mirrorOutStream?.let { synchronized(it) { it.writeByte(9); it.flush() } } } catch (_: Exception) {}
+        try { mirrorFrameSocket?.close() } catch (_: Exception) {}
+        try { mirrorInputSocket?.close() } catch (_: Exception) {}
+        mirrorFrame.value = null
+    }
+
+    fun sendTap(nx: Float, ny: Float) {
+        val o = mirrorOutStream ?: return
+        try { synchronized(o) { o.writeByte(1); o.writeFloat(nx); o.writeFloat(ny); o.flush() } } catch (_: Exception) {}
+    }
+
+    fun sendSwipe(nx1: Float, ny1: Float, nx2: Float, ny2: Float, durMs: Int) {
+        val o = mirrorOutStream ?: return
+        try { synchronized(o) { o.writeByte(2); o.writeFloat(nx1); o.writeFloat(ny1); o.writeFloat(nx2); o.writeFloat(ny2); o.writeInt(durMs); o.flush() } } catch (_: Exception) {}
+    }
+
+    /** 1 = back, 2 = home, 3 = recents */
+    fun sendKey(code: Int) {
+        val o = mirrorOutStream ?: return
+        try { synchronized(o) { o.writeByte(3); o.writeByte(code); o.flush() } } catch (_: Exception) {}
+    }
+
+    fun loadApps() {
+        scope.launch {
+            try {
+                val list = call { i, o ->
+                    o.writeInt(P.APP_LIST); o.flush()
+                    if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
+                    val n = i.readInt()
+                    List(n) { RemoteApp(i.readUTF(), i.readUTF(), i.readBoolean()) }
+                }
+                appsList.value = list
+            } catch (_: Exception) {
+                appsList.value = emptyList()
+            }
+        }
+    }
+
+    suspend fun launchApp(pkg: String) = call { i, o ->
+        o.writeInt(P.APP_LAUNCH); o.writeUTF(pkg); o.flush()
+        if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
+    }
+
+    suspend fun uninstallApp(pkg: String) = call { i, o ->
+        o.writeInt(P.APP_UNINSTALL); o.writeUTF(pkg); o.flush()
+        if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
+    }
+
     fun disconnect() {
         scope.launch(Dispatchers.IO) {
             try { out?.let { it.writeInt(P.BYE); it.flush() } } catch (_: Exception) {}
@@ -227,10 +327,12 @@ object LinkClient {
     }
 
     private fun drop(msg: String?) {
+        stopMirror()
+        appsList.value = null
         try { tcp?.close() } catch (_: Exception) {}
         try { socket?.close() } catch (_: Exception) {}
         try { netCb?.let { netCm?.unregisterNetworkCallback(it) } } catch (_: Exception) {}
-        tcp = null; netCb = null; netCm = null
+        tcp = null; netCb = null; netCm = null; activeNet = null; hostAddr = null
         turbo.value = false; upgrading.value = false
         socket = null; inp = null; out = null
         state.value = if (msg == null) ClientState.Idle else ClientState.Failed(msg)

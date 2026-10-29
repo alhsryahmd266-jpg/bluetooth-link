@@ -12,6 +12,17 @@ import android.bluetooth.BluetoothSocket
 import android.content.ContentUris
 import android.content.ContentResolver
 import android.content.Intent
+import android.app.Activity
+import android.content.pm.ApplicationInfo
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.net.Uri
+import android.provider.Settings
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.os.Bundle
@@ -42,6 +53,9 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import kotlin.concurrent.thread
 
 class LinkService : Service() {
@@ -69,6 +83,12 @@ class LinkService : Service() {
     private var p2pCh: WifiP2pManager.Channel? = null
     private var tcpServer: ServerSocket? = null
     @Volatile private var tcp: Socket? = null
+
+    @Volatile private var projection: MediaProjection? = null
+    @Volatile private var virtualDisplay: VirtualDisplay? = null
+    @Volatile private var imageReader: ImageReader? = null
+    @Volatile private var mirrorServer: ServerSocket? = null
+    @Volatile private var mirrorOn = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -104,7 +124,10 @@ class LinkService : Service() {
     }
 
     private fun goForeground(): Boolean = try {
-        startForeground(NID, buildNotification(Hub.server.value, LinkClient.state.value), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        startForeground(
+            NID, buildNotification(Hub.server.value, LinkClient.state.value),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        )
         true
     } catch (e: Exception) {
         Hub.serverMsg.value = "تعذر بدء الخدمة (امنح الأذونات): ${e.message}"
@@ -250,13 +273,159 @@ class LinkService : Service() {
                 P.PULL_MEDIA -> pullMedia(inp.readInt(), inp.readLong(), out)
                 P.CONTACTS -> contacts(out)
                 P.UPGRADE -> upgrade(out)
+                P.MIRROR -> mirror(out)
+                P.APP_LIST -> appsList(out)
+                P.APP_LAUNCH -> appLaunch(inp.readUTF(), out)
+                P.APP_UNINSTALL -> appUninstall(inp.readUTF(), out)
                 else -> return
             }
             out.flush()
         }
     }
 
+    private fun stopMirror() {
+        mirrorOn = false
+        try { imageReader?.close() } catch (_: Exception) {}
+        try { virtualDisplay?.release() } catch (_: Exception) {}
+        try { projection?.stop() } catch (_: Exception) {}
+        try { mirrorServer?.close() } catch (_: Exception) {}
+        imageReader = null; virtualDisplay = null; projection = null; mirrorServer = null
+    }
+
+    private fun imageToJpeg(img: android.media.Image): ByteArray {
+        val plane = img.planes[0]
+        val pixelStride = plane.pixelStride
+        val rowStride = plane.rowStride
+        val rowPadding = rowStride - pixelStride * img.width
+        val bmpW = img.width + rowPadding / pixelStride
+        var bmp = Bitmap.createBitmap(bmpW, img.height, Bitmap.Config.ARGB_8888)
+        bmp.copyPixelsFromBuffer(plane.buffer)
+        if (rowPadding != 0) bmp = Bitmap.createBitmap(bmp, 0, 0, img.width, img.height)
+        val bo = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 55, bo)
+        return bo.toByteArray()
+    }
+
+    private fun mirror(out: DataOutputStream) {
+        if (RemoteControlService.instance == null) {
+            try {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (_: Exception) {}
+            err(out, "فعّل \"Bluetooth Link\" في إعدادات إمكانية الوصول على هذا الهاتف (فتحنا لك الشاشة)، ثم اطلب التحكم تاني")
+            return
+        }
+        stopMirror()
+        val fut = CompletableFuture<Pair<Int, Intent?>>()
+        MirrorBridge.pending = fut
+        try {
+            startActivity(Intent(this, MirrorPermissionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) {
+            err(out, "تعذر فتح نافذة موافقة مشاركة الشاشة"); return
+        }
+        val (code, data) = try { fut.get(40, TimeUnit.SECONDS) } catch (_: Exception) { Activity.RESULT_CANCELED to null }
+        if (code != Activity.RESULT_OK || data == null) { err(out, "تم رفض مشاركة الشاشة أو انتهت المهلة"); return }
+
+        val mpm = getSystemService(MediaProjectionManager::class.java)
+        val proj = try { mpm.getMediaProjection(code, data) } catch (e: Exception) { err(out, "تعذر بدء مشاركة الشاشة: ${e.message}"); return }
+        projection = proj
+
+        val metrics = resources.displayMetrics
+        val realW = metrics.widthPixels
+        val realH = metrics.heightPixels
+        val scale = minOf(1f, 820f / maxOf(realW, realH))
+        val cw = (realW * scale).toInt().coerceAtLeast(2) / 2 * 2
+        val ch = (realH * scale).toInt().coerceAtLeast(2) / 2 * 2
+
+        val reader = ImageReader.newInstance(cw, ch, PixelFormat.RGBA_8888, 2)
+        imageReader = reader
+        virtualDisplay = proj.createVirtualDisplay(
+            "bl-mirror", cw, ch, metrics.densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null
+        )
+
+        val ss = ServerSocket(0)
+        mirrorServer = ss
+        mirrorOn = true
+        val port = ss.localPort
+
+        thread(name = "mirror-accept") {
+            try {
+                ss.soTimeout = 20_000
+                val frameSocket = ss.accept()
+                val inputSocket = ss.accept()
+                frameSocket.tcpNoDelay = true
+                val fo = DataOutputStream(BufferedOutputStream(frameSocket.getOutputStream(), 256 * 1024))
+
+                reader.setOnImageAvailableListener({ r ->
+                    if (!mirrorOn) return@setOnImageAvailableListener
+                    val img = try { r.acquireLatestImage() } catch (_: Exception) { null } ?: return@setOnImageAvailableListener
+                    try {
+                        val jpg = imageToJpeg(img)
+                        synchronized(fo) {
+                            fo.writeInt(jpg.size); fo.write(jpg); fo.flush()
+                        }
+                    } catch (_: Exception) {
+                    } finally {
+                        try { img.close() } catch (_: Exception) {}
+                    }
+                }, null)
+
+                val ii = DataInputStream(BufferedInputStream(inputSocket.getInputStream(), 8192))
+                val rc = RemoteControlService.instance
+                while (mirrorOn) {
+                    val type = ii.readByte().toInt()
+                    when (type) {
+                        1 -> { val x = ii.readFloat() * realW; val y = ii.readFloat() * realH; rc?.tap(x, y) }
+                        2 -> {
+                            val x1 = ii.readFloat() * realW; val y1 = ii.readFloat() * realH
+                            val x2 = ii.readFloat() * realW; val y2 = ii.readFloat() * realH
+                            val d = ii.readInt()
+                            rc?.swipe(x1, y1, x2, y2, d.toLong())
+                        }
+                        3 -> when (ii.readByte().toInt()) { 1 -> rc?.back(); 2 -> rc?.home(); 3 -> rc?.recents() }
+                        else -> break
+                    }
+                }
+                try { frameSocket.close() } catch (_: Exception) {}
+                try { inputSocket.close() } catch (_: Exception) {}
+            } catch (_: Exception) {
+            } finally {
+                stopMirror()
+            }
+        }
+        out.writeInt(P.OK); out.writeInt(port); out.writeInt(realW); out.writeInt(realH)
+    }
+
+    private fun appsList(out: DataOutputStream) {
+        val apps = try {
+            packageManager.getInstalledApplications(0)
+                .filter { packageManager.getLaunchIntentForPackage(it.packageName) != null }
+                .map { RemoteApp(packageManager.getApplicationLabel(it).toString(), it.packageName, (it.flags and ApplicationInfo.FLAG_SYSTEM) != 0) }
+                .sortedBy { it.label.lowercase() }
+        } catch (e: Exception) { err(out, "تعذرت قراءة التطبيقات: ${e.message}"); return }
+        out.writeInt(P.OK); out.writeInt(apps.size)
+        for (a in apps) { out.writeUTF(a.label); out.writeUTF(a.pkg); out.writeBoolean(a.system) }
+    }
+
+    private fun appLaunch(pkg: String, out: DataOutputStream) {
+        val i = packageManager.getLaunchIntentForPackage(pkg)
+        if (i == null) { err(out, "تعذر فتح التطبيق"); return }
+        try {
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(i)
+            out.writeInt(P.OK)
+        } catch (e: Exception) { err(out, "تعذر فتح التطبيق: ${e.message}") }
+    }
+
+    private fun appUninstall(pkg: String, out: DataOutputStream) {
+        try {
+            startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$pkg")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            out.writeInt(P.OK)
+        } catch (e: Exception) { err(out, "تعذر فتح نافذة إلغاء التثبيت: ${e.message}") }
+    }
+
     private fun cleanupWifi() {
+        stopMirror()
         try { tcp?.close() } catch (_: Exception) {}
         try { tcpServer?.close() } catch (_: Exception) {}
         tcp = null; tcpServer = null

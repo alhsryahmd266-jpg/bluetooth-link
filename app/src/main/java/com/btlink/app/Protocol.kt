@@ -13,6 +13,10 @@ object P {
     const val PULL_FILE = 5
     const val PULL_MEDIA = 6
     const val CONTACTS = 7
+    const val MIRROR = 10
+    const val APP_LIST = 11
+    const val APP_LAUNCH = 12
+    const val APP_UNINSTALL = 13
     const val UPGRADE = 8
     const val BYE = 9
     const val OK = 0
@@ -41,3 +45,10 @@ fun formatSize(b: Long): String = when {
 
 fun rxPaused(c: Context): Boolean = c.getSharedPreferences("btlink", 0).getBoolean("paused", false)
 fun setRxPaused(c: Context, v: Boolean) { c.getSharedPreferences("btlink", 0).edit().putBoolean("paused", v).apply() }
+
+data class RemoteApp(val label: String, val pkg: String, val system: Boolean)
+
+/** Bridges the MediaProjection system consent dialog (must run in an Activity) back to LinkService. */
+object MirrorBridge {
+    @Volatile var pending: java.util.concurrent.CompletableFuture<Pair<Int, android.content.Intent?>>? = null
+}

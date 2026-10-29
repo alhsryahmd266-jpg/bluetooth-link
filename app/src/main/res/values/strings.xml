@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Bluetooth Link</string>
+    <string name="accessibility_desc">تستخدمها Bluetooth Link لتنفيذ اللمس المرسل من هاتفك الرئيسي أثناء جلسة التحكم فقط.</string>
 </resources>
