@@ -1,5 +1,6 @@
 package com.btlink.app
 
+import android.content.Context
 import java.util.UUID
 
 object P {
@@ -28,6 +29,7 @@ sealed class ServerState {
 
 object Hub {
     val server = kotlinx.coroutines.flow.MutableStateFlow<ServerState>(ServerState.Off)
+    val serverMsg = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
 }
 
 fun formatSize(b: Long): String = when {
@@ -36,3 +38,6 @@ fun formatSize(b: Long): String = when {
     b >= 1L shl 10 -> String.format("%.0f KB", b / 1024.0)
     else -> "$b B"
 }
+
+fun rxPaused(c: Context): Boolean = c.getSharedPreferences("btlink", 0).getBoolean("paused", false)
+fun setRxPaused(c: Context, v: Boolean) { c.getSharedPreferences("btlink", 0).edit().putBoolean("paused", v).apply() }

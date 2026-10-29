@@ -104,8 +104,23 @@ object LinkClient {
         state.value = ClientState.Connecting(name)
         var s: BluetoothSocket? = null
         try {
-            s = device.createRfcommSocketToServiceRecord(P.APP_UUID)
-            s.connect()
+            var lastErr: Exception? = null
+            for (attempt in 1..3) {
+                var cand: BluetoothSocket? = null
+                try {
+                    cand = if (attempt < 3) device.createRfcommSocketToServiceRecord(P.APP_UUID)
+                    else device.createInsecureRfcommSocketToServiceRecord(P.APP_UUID)
+                    cand.connect()
+                    s = cand
+                    lastErr = null
+                    break
+                } catch (e: Exception) {
+                    lastErr = e
+                    try { cand?.close() } catch (_: Exception) {}
+                    if (attempt < 3) delay(1200)
+                }
+            }
+            if (s == null) throw (lastErr ?: IOException("connect failed"))
             val i = DataInputStream(BufferedInputStream(s.inputStream, P.BUF))
             val o = DataOutputStream(BufferedOutputStream(s.outputStream, P.BUF))
             o.writeInt(P.MAGIC); o.writeInt(P.HELLO); o.writeUTF(android.os.Build.MODEL); o.flush()
@@ -124,7 +139,7 @@ object LinkClient {
             true
         } catch (e: Exception) {
             try { s?.close() } catch (_: Exception) {}
-            state.value = ClientState.Failed("تعذّر الاتصال. تأكد إن الهاتف الآخر فاتح وضع الاستقبال وإنكم مقترنين ببعض")
+            state.value = ClientState.Failed("تعذّر الاتصال بالهاتف التاني. تأكد إنه مقترن، وإن التطبيق مثبّت عليه ومفتوح مرة واحدة على الأقل، وإن الإشعار \"الاستقبال شغال\" ظاهر هناك. (${e.message})")
             false
         }
     }

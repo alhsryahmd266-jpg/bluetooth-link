@@ -107,6 +107,7 @@ class LinkService : Service() {
         startForeground(NID, buildNotification(Hub.server.value, LinkClient.state.value), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         true
     } catch (e: Exception) {
+        Hub.serverMsg.value = "تعذر بدء الخدمة (امنح الأذونات): ${e.message}"
         stopSelf(); false
     }
 
@@ -170,9 +171,11 @@ class LinkService : Service() {
         if (listening) return
         val adapter = (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
         if (adapter == null || !adapter.isEnabled) {
+            Hub.serverMsg.value = "البلوتوث مقفول"
             Hub.server.value = ServerState.Off
             return
         }
+        Hub.serverMsg.value = null
         listening = true
         Hub.server.value = ServerState.Listening
         thread(name = "bt-accept") {
@@ -188,7 +191,8 @@ class LinkService : Service() {
                     active = s
                     thread(name = "bt-session") { handle(s) }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (listening) Hub.serverMsg.value = "تعذر تشغيل الاستقبال: ${e.message}"
             } finally {
                 listening = false
                 try { serverSocket?.close() } catch (_: Exception) {}

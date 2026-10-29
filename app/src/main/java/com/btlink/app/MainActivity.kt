@@ -177,182 +177,27 @@ fun pulse(from: Float = 0.55f, to: Float = 1f, ms: Int = 900): Float {
     return v
 }
 
+fun startRx(ctx: Context) {
+    try {
+        ctx.startForegroundService(Intent(ctx, LinkService::class.java).setAction(LinkService.ACT_START))
+    } catch (_: Exception) {
+    }
+}
+
+fun sendSvc(ctx: Context, action: String) {
+    try { ctx.startService(Intent(ctx, LinkService::class.java).setAction(action)) } catch (_: Exception) {}
+}
+
 @Composable
 fun App(act: MainActivity) {
-    var screen by remember { mutableStateOf(Screen.Home) }
-    BackHandler(screen != Screen.Home) { screen = Screen.Home }
+    val ctx = LocalContext.current
+    val cs by LinkClient.state.collectAsState()
+    val srv by Hub.server.collectAsState()
+    val c = cs
     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF0D1730), CBg)))) {
-        when (screen) {
-            Screen.Home -> HomeScreen(act) { screen = it }
-            Screen.Main -> MainScreen(act) { screen = Screen.Home }
-            Screen.Receiver -> ReceiverScreen(act) { screen = Screen.Home }
-        }
+        if (c is ClientState.Connected) Browser(c.name) { LinkClient.disconnect() } else Dashboard(act)
     }
-}
-
-// ---------------------------------------------------------------- Home
-
-@Composable
-fun HomeScreen(act: MainActivity, go: (Screen) -> Unit) {
-    val ctx = LocalContext.current
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { act.tick.intValue++ }
-    LaunchedEffect(Unit) {
-        val missing = neededPerms().filter { ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED }
-        if (missing.isNotEmpty()) launcher.launch(missing.toTypedArray())
-    }
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Spacer(Modifier.height(36.dp))
-        val p = pulse(0.92f, 1.06f, 1400)
-        Box(
-            Modifier.size(120.dp).scale(p).clip(CircleShape)
-                .background(Brush.radialGradient(listOf(CCyan.copy(alpha = 0.35f), CIndigo.copy(alpha = 0.10f), Color.Transparent))),
-            contentAlignment = Alignment.Center
-        ) {
-            Box(
-                Modifier.size(84.dp).clip(CircleShape).background(Brush.linearGradient(listOf(CCyan, CIndigo))),
-                contentAlignment = Alignment.Center
-            ) { Icon(Icons.Rounded.Bluetooth, null, tint = Color.White, modifier = Modifier.size(46.dp)) }
-        }
-        Spacer(Modifier.height(18.dp))
-        Text("Bluetooth Link", fontSize = 30.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
-        Spacer(Modifier.height(6.dp))
-        Text("هاتفك التاني يبقى كأنه جزء من هاتفك", color = CDim, fontSize = 15.sp, textAlign = TextAlign.Center)
-        Spacer(Modifier.height(34.dp))
-
-        RoleCard("هذا هاتفي الرئيسي", "اتصل بهاتفك التاني واسحب أي صورة أو فيديو أو ملف بضغطة واحدة", Icons.Rounded.BluetoothConnected, listOf(CCyan, CIndigo)) { go(Screen.Main) }
-        Spacer(Modifier.height(16.dp))
-        RoleCard("هذا هو الهاتف التاني", "شغّل الاستقبال ووافق على الطلب لما هاتفك الرئيسي يتصل", Icons.Rounded.PhoneAndroid, listOf(CIndigo, Color(0xFFA855F7))) { go(Screen.Receiver) }
-
-        Spacer(Modifier.height(28.dp))
-        Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(CSurf).padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.Rounded.Shield, null, tint = CGreen)
-            Spacer(Modifier.width(12.dp))
-            Text(
-                "الأمان: كل جلسة لازم توافق عليها من الهاتف التاني، ويفضل إشعار ثابت ظاهر عليه طول ما الاتصال شغال، وتقدر تقطعه في أي لحظة.",
-                color = CDim, fontSize = 13.sp, lineHeight = 20.sp
-            )
-        }
-    }
-}
-
-@Composable
-fun RoleCard(title: String, sub: String, icon: androidx.compose.ui.graphics.vector.ImageVector, colors: List<Color>, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp))
-            .background(Brush.linearGradient(colors.map { it.copy(alpha = 0.22f) }))
-            .border(1.dp, colors[0].copy(alpha = 0.55f), RoundedCornerShape(22.dp))
-            .clickable(onClick = onClick).padding(18.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(Modifier.size(56.dp).clip(RoundedCornerShape(16.dp)).background(Brush.linearGradient(colors)), contentAlignment = Alignment.Center) {
-            Icon(icon, null, tint = Color.White, modifier = Modifier.size(30.dp))
-        }
-        Spacer(Modifier.width(16.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
-            Spacer(Modifier.height(4.dp))
-            Text(sub, fontSize = 13.sp, color = CDim, lineHeight = 19.sp)
-        }
-    }
-}
-
-@Composable
-fun TopBar(title: String, onBack: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onBack) { Icon(Icons.Rounded.ArrowBack, null, tint = Color.White) }
-        Text(title, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
-    }
-}
-
-// ---------------------------------------------------------------- Receiver
-
-@Composable
-fun ReceiverScreen(act: MainActivity, back: () -> Unit) {
-    val ctx = LocalContext.current
-    val st by Hub.server.collectAsState()
-    val allFiles = remember(act.tick.intValue) { Environment.isExternalStorageManager() }
-    val btOn = remember(act.tick.intValue) { ctx.getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true }
-
-    fun send(action: String) {
-        try {
-            if (action == LinkService.ACT_START) ctx.startForegroundService(Intent(ctx, LinkService::class.java).setAction(action))
-            else ctx.startService(Intent(ctx, LinkService::class.java).setAction(action))
-        } catch (_: Exception) {}
-    }
-
-    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        act.tick.intValue++
-        if (hasBt(ctx)) send(LinkService.ACT_START)
-    }
-
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        TopBar("وضع الاستقبال", back)
-        Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            val color = when (st) { is ServerState.Off -> CDim; is ServerState.Connected -> CGreen; else -> CCyan }
-            val p = if (st is ServerState.Off) 1f else pulse(0.9f, 1.08f, 1100)
-            Box(Modifier.size(150.dp).scale(p).clip(CircleShape).background(color.copy(alpha = 0.15f)), contentAlignment = Alignment.Center) {
-                Box(Modifier.size(100.dp).clip(CircleShape).background(color.copy(alpha = 0.30f)), contentAlignment = Alignment.Center) {
-                    Icon(if (st is ServerState.Connected) Icons.Rounded.BluetoothConnected else Icons.Rounded.Bluetooth, null, tint = color, modifier = Modifier.size(52.dp))
-                }
-            }
-            Spacer(Modifier.height(20.dp))
-            val s = st
-            val label = when (s) {
-                is ServerState.Off -> "الاستقبال متوقف"
-                is ServerState.Listening -> "في انتظار هاتفك الرئيسي…"
-                is ServerState.Pending -> "طلب اتصال من ${s.name}"
-                is ServerState.Connected -> "متصل مع ${s.name}"
-            }
-            Text(label, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White, textAlign = TextAlign.Center)
-            Spacer(Modifier.height(24.dp))
-
-            if (!btOn) {
-                Warn("البلوتوث مقفول. شغّله من إعدادات الهاتف، وتأكد إن الهاتفين مقترنين ببعض.")
-                Spacer(Modifier.height(14.dp))
-            }
-            if (!allFiles) {
-                Warn("عشان الهاتف الرئيسي يقدر يتصفح ملفاتك، فعّل \"الوصول لكل الملفات\" لهذا التطبيق (الصور والفيديو تشتغل بدونه).")
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(onClick = {
-                    try {
-                        ctx.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + ctx.packageName)))
-                    } catch (_: Exception) {
-                        ctx.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-                    }
-                }) { Text("فتح الإعداد") }
-                Spacer(Modifier.height(14.dp))
-            }
-
-            when (st) {
-                is ServerState.Off -> Button(
-                    onClick = {
-                        if (!hasBt(ctx)) permLauncher.launch(neededPerms().toTypedArray()) else send(LinkService.ACT_START)
-                    },
-                    modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(16.dp)
-                ) { Text("تشغيل الاستقبال", fontSize = 17.sp, fontWeight = FontWeight.Bold) }
-
-                is ServerState.Listening -> OutlinedButton(
-                    onClick = { send(LinkService.ACT_STOP) }, modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(16.dp)
-                ) { Text("إيقاف الاستقبال", fontSize = 16.sp) }
-
-                is ServerState.Connected -> Button(
-                    onClick = { send(LinkService.ACT_DISCONNECT) },
-                    colors = ButtonDefaults.buttonColors(containerColor = CRed, contentColor = Color.Black),
-                    modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(16.dp)
-                ) { Text("قطع الاتصال", fontSize = 17.sp, fontWeight = FontWeight.Bold) }
-
-                else -> {}
-            }
-        }
-    }
-
-    val s = st
+    val s = srv
     if (s is ServerState.Pending) {
         AlertDialog(
             onDismissRequest = {},
@@ -360,8 +205,8 @@ fun ReceiverScreen(act: MainActivity, back: () -> Unit) {
             icon = { Icon(Icons.Rounded.Shield, null, tint = CCyan) },
             title = { Text("طلب اتصال بلوتوث", color = Color.White) },
             text = { Text("الهاتف \"${s.name}\" يطلب الاتصال بهذا الهاتف وسحب ملفات منه طول هذه الجلسة. هل توافق؟", color = CDim) },
-            confirmButton = { Button(onClick = { send(LinkService.ACT_ALLOW) }) { Text("موافق") } },
-            dismissButton = { TextButton(onClick = { send(LinkService.ACT_DENY) }) { Text("رفض", color = CRed) } }
+            confirmButton = { Button(onClick = { sendSvc(ctx, LinkService.ACT_ALLOW) }) { Text("موافق") } },
+            dismissButton = { TextButton(onClick = { sendSvc(ctx, LinkService.ACT_DENY) }) { Text("رفض", color = CRed) } }
         )
     }
 }
@@ -374,65 +219,154 @@ fun Warn(text: String) {
     )
 }
 
-// ---------------------------------------------------------------- Main (puller)
-
 @Composable
-fun MainScreen(act: MainActivity, back: () -> Unit) {
-    val cs by LinkClient.state.collectAsState()
-    val s = cs
-    if (s is ClientState.Connected) Browser(s.name, back) else DevicePicker(act, s, back)
-}
-
-@Composable
-fun DevicePicker(act: MainActivity, cs: ClientState, back: () -> Unit) {
+fun Dashboard(act: MainActivity) {
     val ctx = LocalContext.current
+    val srv by Hub.server.collectAsState()
+    val srvMsg by Hub.serverMsg.collectAsState()
+    val cs by LinkClient.state.collectAsState()
+    val tick = act.tick.intValue
+    val adapter = ctx.getSystemService(BluetoothManager::class.java)?.adapter
+    val btOn = remember(tick) { adapter?.isEnabled == true }
+    val hasPerm = remember(tick) { hasBt(ctx) }
+    val allFiles = remember(tick) { Environment.isExternalStorageManager() }
+    val battOk = remember(tick) { ctx.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName) }
+    var paused by remember(tick) { mutableStateOf(rxPaused(ctx)) }
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { act.tick.intValue++ }
-    val devices = remember(act.tick.intValue) {
+
+    LaunchedEffect(Unit) {
+        val missing = neededPerms().filter { ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) permLauncher.launch(missing.toTypedArray())
+    }
+    LaunchedEffect(tick, btOn, hasPerm, paused) {
+        if (hasPerm && btOn && !paused) startRx(ctx)
+    }
+
+    val devices = remember(tick) {
         try {
-            ctx.getSystemService(BluetoothManager::class.java)?.adapter?.bondedDevices?.toList() ?: emptyList()
+            adapter?.bondedDevices?.toList() ?: emptyList()
         } catch (_: SecurityException) { emptyList<BluetoothDevice>() }
     }
     val busy = cs is ClientState.Connecting || cs is ClientState.Waiting
+    val s = srv
+    val statusPair: Pair<String, Color> = when {
+        s is ServerState.Connected -> "متصل مع ${s.name}" to CGreen
+        s is ServerState.Pending -> "طلب اتصال من ${s.name}" to CCyan
+        s is ServerState.Listening -> "✓ هذا الهاتف جاهز لاستقبال اتصال من هاتفك الرئيسي" to CGreen
+        paused -> "الاستقبال موقوف" to CDim
+        !hasPerm -> "محتاج أذونات البلوتوث" to CRed
+        !btOn -> "البلوتوث مقفول" to CRed
+        else -> (srvMsg ?: "جاري التجهيز…") to CDim
+    }
 
-    Column(Modifier.fillMaxSize()) {
-        TopBar("اختر هاتفك التاني", back)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
-            if (!hasBt(ctx)) {
-                Warn("محتاجين إذن البلوتوث الأول.")
-                Spacer(Modifier.height(8.dp))
-                Button(onClick = { permLauncher.launch(neededPerms().toTypedArray()) }) { Text("منح الأذونات") }
-                Spacer(Modifier.height(16.dp))
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(44.dp).clip(CircleShape).background(Brush.linearGradient(listOf(CCyan, CIndigo))), contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Bluetooth, null, tint = Color.White)
             }
-            when (cs) {
-                is ClientState.Connecting -> StatusLine("جاري الاتصال بـ ${cs.name}…", CCyan, true)
-                is ClientState.Waiting -> StatusLine("في انتظار موافقتك على الهاتف التاني ${cs.name}…", CCyan, true)
-                is ClientState.Failed -> StatusLine(cs.msg, CRed, false)
-                else -> {}
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text("Bluetooth Link", fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                Text("تحكم في هواتفك من هاتف واحد", color = CDim, fontSize = 13.sp)
             }
-            Spacer(Modifier.height(8.dp))
-            if (devices.isEmpty()) {
-                Text("مفيش أجهزة مقترنة. اقرن هاتفك التاني من إعدادات البلوتوث، وبعدين ارجع هنا.", color = CDim, fontSize = 14.sp, lineHeight = 21.sp)
-            }
-            for (d in devices) {
-                val n = d.safeName()
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(18.dp)).background(CCard)
-                        .clickable(enabled = !busy) { LinkClient.connectAsync(ctx, d, n) }.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Rounded.PhoneAndroid, null, tint = CCyan, modifier = Modifier.size(30.dp))
-                    Spacer(Modifier.width(14.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(n, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Text(d.address, color = CDim, fontSize = 12.sp)
-                    }
-                    Text("اتصال", color = CCyan, fontWeight = FontWeight.Bold)
-                }
-            }
-            Spacer(Modifier.height(14.dp))
-            OutlinedButton(onClick = { ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }) { Text("إقران هاتف جديد") }
-            Spacer(Modifier.height(24.dp))
         }
+        Spacer(Modifier.height(20.dp))
+
+        // ---- this phone (receiver) status
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(CSurf).padding(16.dp)) {
+            Text("هذا الهاتف (${Build.MODEL})", color = CDim, fontSize = 12.sp)
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(10.dp).alpha(if (s is ServerState.Listening) pulse() else 1f).clip(CircleShape).background(statusPair.second))
+                Spacer(Modifier.width(10.dp))
+                Text(statusPair.first, color = statusPair.second, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, lineHeight = 21.sp)
+            }
+            if (s is ServerState.Connected) {
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = { sendSvc(ctx, LinkService.ACT_DISCONNECT) },
+                    colors = ButtonDefaults.buttonColors(containerColor = CRed, contentColor = Color.Black)
+                ) { Text("قطع الاتصال", fontWeight = FontWeight.Bold) }
+            } else {
+                Spacer(Modifier.height(6.dp))
+                TextButton(onClick = {
+                    if (paused || s !is ServerState.Listening) {
+                        setRxPaused(ctx, false); paused = false; startRx(ctx)
+                    } else {
+                        setRxPaused(ctx, true); paused = true; sendSvc(ctx, LinkService.ACT_STOP)
+                    }
+                }) { Text(if (s is ServerState.Listening) "إيقاف الاستقبال مؤقتاً" else "تشغيل الاستقبال", color = CCyan) }
+            }
+        }
+
+        // ---- problems with one-tap fixes
+        if (!hasPerm) {
+            Spacer(Modifier.height(12.dp)); Warn("لازم تمنح إذن \"الأجهزة القريبة\" وباقي الأذونات.")
+            Spacer(Modifier.height(6.dp)); Button(onClick = { permLauncher.launch(neededPerms().toTypedArray()) }) { Text("منح الأذونات") }
+        }
+        if (!btOn) {
+            Spacer(Modifier.height(12.dp)); Warn("البلوتوث مقفول. شغّله من هنا.")
+            Spacer(Modifier.height(6.dp)); Button(onClick = { try { ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) } catch (_: Exception) {} }) { Text("فتح إعدادات البلوتوث") }
+        }
+        if (!battOk) {
+            Spacer(Modifier.height(12.dp)); Warn("عشان الهاتف يفضل جاهز للاستقبال حتى لو التطبيق مقفول، استثنِ التطبيق من توفير البطارية.")
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = {
+                try { ctx.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))) } catch (_: Exception) {}
+            }) { Text("السماح بالعمل في الخلفية") }
+        }
+        if (!allFiles) {
+            Spacer(Modifier.height(12.dp)); Warn("عشان الهاتف الرئيسي يتصفح ملفات هذا الهاتف، فعّل \"الوصول لكل الملفات\" (الصور والفيديو شغالة بدونه).")
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = {
+                try { ctx.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + ctx.packageName))) }
+                catch (_: Exception) { try { ctx.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) } catch (_: Exception) {} }
+            }) { Text("فتح الإعداد") }
+        }
+
+        // ---- my other phones
+        Spacer(Modifier.height(26.dp))
+        Text("هواتفي (الأجهزة المقترنة)", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(4.dp))
+        Text("اضغط على الهاتف اللي عايز تتحكم فيه. هيطلب موافقة على شاشته.", color = CDim, fontSize = 13.sp)
+        Spacer(Modifier.height(10.dp))
+        when (val c = cs) {
+            is ClientState.Connecting -> StatusLine("جاري الاتصال بـ ${c.name}…", CCyan, true)
+            is ClientState.Waiting -> StatusLine("في انتظار موافقتك على شاشة ${c.name}…", CCyan, true)
+            is ClientState.Failed -> StatusLine(c.msg, CRed, false)
+            else -> {}
+        }
+        if (devices.isEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text("مفيش أجهزة مقترنة لسه. اقرن هاتفك التاني من إعدادات البلوتوث، وبعدين ارجع هنا.", color = CDim, fontSize = 14.sp, lineHeight = 21.sp)
+        }
+        for (d in devices) {
+            val n = d.safeName()
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(18.dp)).background(CCard)
+                    .clickable(enabled = !busy) { LinkClient.connectAsync(ctx, d, n) }.padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Rounded.PhoneAndroid, null, tint = CCyan, modifier = Modifier.size(30.dp))
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(n, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text(d.address, color = CDim, fontSize = 12.sp)
+                }
+                Text("اتصال", color = CCyan, fontWeight = FontWeight.Bold)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(onClick = { try { ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) } catch (_: Exception) {} }) { Text("إقران هاتف جديد") }
+
+        Spacer(Modifier.height(24.dp))
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(CSurf).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Shield, null, tint = CGreen)
+            Spacer(Modifier.width(12.dp))
+            Text("أي اتصال بيحتاج موافقتك على الهاتف الآخر، وبيظهر إشعار ثابت هناك طول الجلسة، وتقدر تقطعه في أي لحظة.", color = CDim, fontSize = 13.sp, lineHeight = 20.sp)
+        }
+        Spacer(Modifier.height(24.dp))
     }
 }
 
