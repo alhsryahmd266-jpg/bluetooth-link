@@ -268,19 +268,26 @@ class LinkService : Service() {
 
     private fun serve(inp: DataInputStream, out: DataOutputStream) {
         while (true) {
-            when (inp.readInt()) {
-                P.LIST_DIR -> listDir(inp.readUTF(), out)
-                P.LIST_MEDIA -> listMedia(inp.readInt(), inp.readInt(), inp.readInt(), out)
-                P.THUMB -> thumb(inp.readInt(), inp.readLong(), out)
-                P.PULL_FILE -> pullFile(inp.readUTF(), out)
-                P.PULL_MEDIA -> pullMedia(inp.readInt(), inp.readLong(), out)
-                P.CONTACTS -> contacts(out)
-                P.UPGRADE -> upgrade(out)
-                P.MIRROR -> mirror(out)
-                P.APP_LIST -> appsList(out)
-                P.APP_LAUNCH -> appLaunch(inp.readUTF(), out)
-                P.APP_UNINSTALL -> appUninstall(inp.readUTF(), out)
-                else -> return
+            val op = inp.readInt()
+            try {
+                when (op) {
+                    P.LIST_DIR -> listDir(inp.readUTF(), out)
+                    P.LIST_MEDIA -> listMedia(inp.readInt(), inp.readInt(), inp.readInt(), out)
+                    P.THUMB -> thumb(inp.readInt(), inp.readLong(), out)
+                    P.PULL_FILE -> pullFile(inp.readUTF(), out)
+                    P.PULL_MEDIA -> pullMedia(inp.readInt(), inp.readLong(), out)
+                    P.CONTACTS -> contacts(out)
+                    P.UPGRADE -> upgrade(out)
+                    P.MIRROR -> mirror(out)
+                    P.APP_LIST -> appsList(out)
+                    P.APP_LAUNCH -> appLaunch(inp.readUTF(), out)
+                    P.APP_UNINSTALL -> appUninstall(inp.readUTF(), out)
+                    else -> return
+                }
+            } catch (e: java.io.IOException) {
+                throw e
+            } catch (t: Throwable) {
+                try { out.writeInt(P.ERR); out.writeUTF("خطأ غير متوقع على الهاتف المستقبل: ${t.message ?: t.javaClass.simpleName}") } catch (_: Exception) {}
             }
             out.flush()
         }
@@ -558,12 +565,23 @@ class LinkService : Service() {
 
     private fun thumb(kind: Int, id: Long, out: DataOutputStream) {
         val bytes = try {
-            val uri = ContentUris.withAppendedId(collection(kind), id)
-            val bmp: Bitmap = contentResolver.loadThumbnail(uri, Size(200, 200), null)
-            val bo = ByteArrayOutputStream()
-            bmp.compress(Bitmap.CompressFormat.JPEG, 65, bo)
-            bo.toByteArray()
-        } catch (_: Exception) {
+            val bmp: Bitmap? = if (Build.VERSION.SDK_INT >= 29) {
+                val uri = ContentUris.withAppendedId(collection(kind), id)
+                contentResolver.loadThumbnail(uri, Size(200, 200), null)
+            } else {
+                @Suppress("DEPRECATION")
+                when (kind) {
+                    0 -> MediaStore.Images.Thumbnails.getThumbnail(contentResolver, id, MediaStore.Images.Thumbnails.MINI_KIND, null)
+                    1 -> MediaStore.Video.Thumbnails.getThumbnail(contentResolver, id, MediaStore.Video.Thumbnails.MINI_KIND, null)
+                    else -> null
+                }
+            }
+            if (bmp == null) ByteArray(0) else {
+                val bo = ByteArrayOutputStream()
+                bmp.compress(Bitmap.CompressFormat.JPEG, 65, bo)
+                bo.toByteArray()
+            }
+        } catch (_: Throwable) {
             ByteArray(0)
         }
         out.writeInt(bytes.size); out.write(bytes)
