@@ -13,7 +13,11 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.Uri
 import android.net.wifi.WifiNetworkSpecifier
+import android.os.Build
+import android.os.Environment
 import android.os.SystemClock
+import android.media.MediaScannerConnection
+import androidx.core.content.FileProvider
 import android.provider.MediaStore
 import android.util.LruCache
 import kotlinx.coroutines.CompletableDeferred
@@ -163,6 +167,10 @@ object LinkClient {
     /** Switch the data channel from Bluetooth to Wi-Fi Direct (much faster). Falls back silently to Bluetooth. */
     private suspend fun upgrade(ctx: Context): Boolean = withContext(Dispatchers.IO) {
         if (turbo.value || upgrading.value || state.value !is ClientState.Connected) return@withContext false
+        if (android.os.Build.VERSION.SDK_INT < 29) {
+            wifiMsg.value = "الوضع السريع يحتاج أندرويد 10 أو أحدث على هذا الهاتف"
+            return@withContext false
+        }
         upgrading.value = true
         wifiMsg.value = null
         var cb: ConnectivityManager.NetworkCallback? = null
@@ -418,21 +426,41 @@ object LinkClient {
         val mime = i.readUTF()
         val size = i.readLong()
 
-        val (collection, rel) = when {
-            mime.startsWith("image/") -> MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to "Pictures/BluetoothLink"
-            mime.startsWith("video/") -> MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to "Movies/BluetoothLink"
-            mime.startsWith("audio/") -> MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to "Music/BluetoothLink"
-            else -> MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to "Download/BluetoothLink"
+        val legacy = Build.VERSION.SDK_INT < 29
+        val subdir = when {
+            mime.startsWith("image/") -> "Pictures/BluetoothLink"
+            mime.startsWith("video/") -> "Movies/BluetoothLink"
+            mime.startsWith("audio/") -> "Music/BluetoothLink"
+            else -> "Download/BluetoothLink"
         }
-        val cv = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            put(MediaStore.MediaColumns.MIME_TYPE, mime)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, rel)
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
-        }
+
+        var uri: Uri? = null
+        var os: OutputStream? = null
+        var legacyFile: java.io.File? = null
         val resolver = ctx.contentResolver
-        val uri = resolver.insert(collection, cv)
-        var os: OutputStream? = if (uri != null) try { resolver.openOutputStream(uri) } catch (_: Exception) { null } else null
+
+        if (legacy) {
+            val base = Environment.getExternalStorageDirectory()
+            val dir = java.io.File(base, subdir).apply { mkdirs() }
+            val f = java.io.File(dir, name)
+            legacyFile = f
+            os = try { f.outputStream() } catch (_: Exception) { null }
+        } else {
+            val collection = when {
+                mime.startsWith("image/") -> MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                mime.startsWith("video/") -> MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                mime.startsWith("audio/") -> MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                else -> MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            }
+            val cv = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, subdir)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            uri = resolver.insert(collection, cv)
+            os = if (uri != null) try { resolver.openOutputStream(uri) } catch (_: Exception) { null } else null
+        }
         var failed = os == null
 
         transfer.value = Transfer(name, 0, size, 0.0, 0)
@@ -455,13 +483,23 @@ object LinkClient {
             }
         }
         try { os?.close() } catch (_: Exception) {}
-        if (failed || uri == null) {
+        if (failed) {
             if (uri != null) try { resolver.delete(uri, null, null) } catch (_: Exception) {}
+            try { legacyFile?.delete() } catch (_: Exception) {}
             throw RemoteError("فشل حفظ الملف على هذا الهاتف (تأكد من مساحة التخزين)")
         }
-        val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
-        resolver.update(uri, done, null, null)
+
+        val finalUri: Uri?
+        if (legacy) {
+            val f = legacyFile!!
+            try { MediaScannerConnection.scanFile(ctx, arrayOf(f.absolutePath), arrayOf(mime), null) } catch (_: Exception) {}
+            finalUri = try { FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", f) } catch (_: Exception) { null }
+        } else {
+            val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+            resolver.update(uri!!, done, null, null)
+            finalUri = uri
+        }
         val dt = maxOf(1L, SystemClock.elapsedRealtime() - t0)
-        transfer.value = Transfer(name, size, size, size * 1000.0 / dt, 1, "", uri, mime)
+        transfer.value = Transfer(name, size, size, size * 1000.0 / dt, 1, "", finalUri, mime)
     }
 }

@@ -129,6 +129,7 @@ enum class Screen { Home, Main, Receiver }
 fun neededPerms(): List<String> = buildList {
     if (Build.VERSION.SDK_INT >= 31) add(Manifest.permission.BLUETOOTH_CONNECT)
     if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.NEARBY_WIFI_DEVICES) else add(Manifest.permission.ACCESS_FINE_LOCATION)
+    if (Build.VERSION.SDK_INT < 29) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
     if (Build.VERSION.SDK_INT >= 33) {
         add(Manifest.permission.POST_NOTIFICATIONS)
         add(Manifest.permission.READ_MEDIA_IMAGES)
@@ -236,7 +237,7 @@ fun Dashboard(act: MainActivity) {
     val adapter = ctx.getSystemService(BluetoothManager::class.java)?.adapter
     val btOn = remember(tick) { adapter?.isEnabled == true }
     val hasPerm = remember(tick) { hasBt(ctx) }
-    val allFiles = remember(tick) { Environment.isExternalStorageManager() }
+    val allFiles = remember(tick) { Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager() }
     val battOk = remember(tick) { ctx.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName) }
     var paused by remember(tick) { mutableStateOf(rxPaused(ctx)) }
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { act.tick.intValue++ }

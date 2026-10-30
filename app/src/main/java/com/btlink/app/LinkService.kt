@@ -1,6 +1,7 @@
 package com.btlink.app
 
-import android.app.Notification
+import androidx.core.app.NotificationCompat
+import androidx.core.content.FileProvider
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -91,8 +92,10 @@ class LinkService : Service() {
     override fun onCreate() {
         super.onCreate()
         nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(CH, "جلسة البلوتوث", NotificationManager.IMPORTANCE_LOW))
-        nm.createNotificationChannel(NotificationChannel(CH_REQ, "طلبات الاتصال", NotificationManager.IMPORTANCE_HIGH))
+        if (Build.VERSION.SDK_INT >= 26) {
+            nm.createNotificationChannel(NotificationChannel(CH, "جلسة البلوتوث", NotificationManager.IMPORTANCE_LOW))
+            nm.createNotificationChannel(NotificationChannel(CH_REQ, "طلبات الاتصال", NotificationManager.IMPORTANCE_HIGH))
+        }
         scope.launch {
             combine(Hub.server, LinkClient.state) { s, c -> s to c }.collect { (s, c) ->
                 if (started) {
@@ -120,10 +123,12 @@ class LinkService : Service() {
     }
 
     private fun goForeground(): Boolean = try {
-        startForeground(
-            NID, buildNotification(Hub.server.value, LinkClient.state.value),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-        )
+        val notif = buildNotification(Hub.server.value, LinkClient.state.value)
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(NID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(NID, notif)
+        }
         true
     } catch (e: Exception) {
         Hub.serverMsg.value = "تعذر بدء الخدمة (امنح الأذونات): ${e.message}"
@@ -156,30 +161,30 @@ class LinkService : Service() {
             c is ClientState.Connecting || c is ClientState.Waiting -> "جاري الاتصال…"
             else -> "الاستقبال شغال — في انتظار هاتفك الرئيسي"
         }
-        val b = Notification.Builder(this, CH)
+        val b = NotificationCompat.Builder(this, CH)
             .setSmallIcon(R.drawable.ic_bt)
             .setContentTitle("Bluetooth Link")
             .setContentText(text)
             .setOngoing(true)
             .setContentIntent(openApp())
         if (s is ServerState.Connected || c is ClientState.Connected) {
-            b.addAction(Notification.Action.Builder(null, "قطع الاتصال", pi(ACT_DISCONNECT, 1)).build())
+            b.addAction(0, "قطع الاتصال", pi(ACT_DISCONNECT, 1))
         } else if (s is ServerState.Listening) {
-            b.addAction(Notification.Action.Builder(null, "إيقاف الاستقبال", pi(ACT_STOP, 2)).build())
+            b.addAction(0, "إيقاف الاستقبال", pi(ACT_STOP, 2))
         }
         return b.build()
     }
 
     private fun showRequest(name: String) {
-        val n = Notification.Builder(this, CH_REQ)
+        val n = NotificationCompat.Builder(this, CH_REQ)
             .setSmallIcon(R.drawable.ic_bt)
             .setContentTitle("طلب اتصال بلوتوث")
             .setContentText("الهاتف \"$name\" يريد الاتصال وسحب ملفات من هذا الهاتف")
-            .setCategory(Notification.CATEGORY_CALL)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
             .setTimeoutAfter(60_000)
             .setContentIntent(openApp())
-            .addAction(Notification.Action.Builder(null, "موافق", pi(ACT_ALLOW, 3)).build())
-            .addAction(Notification.Action.Builder(null, "رفض", pi(ACT_DENY, 4)).build())
+            .addAction(0, "موافق", pi(ACT_ALLOW, 3))
+            .addAction(0, "رفض", pi(ACT_DENY, 4))
             .build()
         nm.notify(NID_REQ, n)
     }
@@ -453,6 +458,7 @@ class LinkService : Service() {
             val rm = CompletableFuture<Boolean>()
             wp.removeGroup(ch, listener(rm))
             try { rm.get(3, TimeUnit.SECONDS) } catch (_: Exception) {}
+            if (Build.VERSION.SDK_INT < 29) { err(out, "الوضع السريع يحتاج أندرويد 10 أو أحدث على هذا الهاتف، وسيعمل التطبيق عبر البلوتوث"); return }
             for (band in intArrayOf(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ, WifiP2pConfig.GROUP_OWNER_BAND_AUTO)) {
                 val cfg = WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(pass).setGroupOperatingBand(band).build()
                 val f = CompletableFuture<Boolean>()
@@ -499,9 +505,11 @@ class LinkService : Service() {
         return if (f.path == root.path || f.path.startsWith(root.path + "/")) f else null
     }
 
+    private fun allFilesOk(): Boolean = Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
+
     private fun listDir(path: String, out: DataOutputStream) {
         val dir = safe(path)
-        val files = if (Environment.isExternalStorageManager()) dir?.listFiles() else null
+        val files = if (allFilesOk()) dir?.listFiles() else null
         if (dir == null || files == null) {
             err(out, "فعّل \"الوصول لكل الملفات\" للتطبيق على الهاتف المستقبل عشان تتصفح الملفات"); return
         }
@@ -572,7 +580,7 @@ class LinkService : Service() {
 
     private fun pullFile(path: String, out: DataOutputStream) {
         val f = safe(path)
-        if (f == null || !f.isFile || !Environment.isExternalStorageManager()) { err(out, "الملف غير متاح"); return }
+        if (f == null || !f.isFile || !allFilesOk()) { err(out, "الملف غير متاح"); return }
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(f.extension.lowercase()) ?: "application/octet-stream"
         val ins = try { f.inputStream() } catch (_: Exception) { null }
         if (ins == null) { err(out, "تعذر فتح الملف"); return }
