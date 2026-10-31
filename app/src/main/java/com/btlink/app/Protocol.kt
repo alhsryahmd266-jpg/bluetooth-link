@@ -22,6 +22,7 @@ object P {
     const val BYE = 9
     const val OK = 0
     const val ERR = 1
+    const val TCP_PORT = 53217
     const val BUF = 256 * 1024
 }
 

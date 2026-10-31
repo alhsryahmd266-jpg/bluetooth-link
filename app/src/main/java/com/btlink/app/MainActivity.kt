@@ -49,6 +49,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -252,6 +254,53 @@ fun Warn(text: String) {
 }
 
 @Composable
+fun RemoteConnectCard(busy: Boolean) {
+    val ctx = LocalContext.current
+    var host by remember { mutableStateOf("") }
+    var open by remember { mutableStateOf(false) }
+    val cs by LinkClient.state.collectAsState()
+
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(CSurf).padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { open = !open }) {
+            Icon(Icons.Rounded.Public, null, tint = CIndigo)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text("الاتصال عن بعد (Tailscale)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                Text("للتحكم من مكان بعيد، زي الشغل والبيت، عن طريق الإنترنت", color = CDim, fontSize = 12.sp)
+            }
+            Text(if (open) "إخفاء" else "فتح", color = CCyan, fontSize = 13.sp)
+        }
+        if (open) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "ثبّت تطبيق Tailscale (مجاني) على الهاتفين وادخل بنفس الحساب على الاتنين، وهتلاقي لكل هاتف عنوان ثابت زي 100.x.x.x داخل تطبيق Tailscale نفسه. انسخه هنا واضغط اتصال.",
+                color = CDim, fontSize = 12.sp, lineHeight = 19.sp
+            )
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = host, onValueChange = { host = it },
+                placeholder = { Text("100.x.x.x أو اسم الهاتف على Tailscale") },
+                singleLine = true, modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(10.dp))
+            when (val c = cs) {
+                is ClientState.Connecting -> StatusLine("جاري الاتصال بـ ${c.name}…", CCyan, true)
+                is ClientState.Waiting -> StatusLine("في انتظار موافقتك على الهاتف التاني…", CCyan, true)
+                is ClientState.Failed -> StatusLine(c.msg, CRed, false)
+                else -> {}
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = { if (host.isNotBlank()) LinkClient.connectRemoteAsync(ctx, host.trim(), host.trim()) },
+                enabled = !busy && host.isNotBlank(),
+                modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = CIndigo)
+            ) { Text("اتصال عن بعد", fontWeight = FontWeight.Bold) }
+        }
+    }
+}
+
+@Composable
 fun Dashboard(act: MainActivity) {
     val ctx = LocalContext.current
     val srv by Hub.server.collectAsState()
@@ -398,6 +447,9 @@ fun Dashboard(act: MainActivity) {
         }
         Spacer(Modifier.height(12.dp))
         OutlinedButton(onClick = { try { ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) } catch (_: Exception) {} }) { Text("إقران هاتف جديد") }
+
+        Spacer(Modifier.height(28.dp))
+        RemoteConnectCard(busy)
 
         Spacer(Modifier.height(24.dp))
         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(CSurf).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {

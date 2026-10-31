@@ -74,7 +74,7 @@ object LinkClient {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lock = Mutex()
 
-    @Volatile private var socket: BluetoothSocket? = null
+    @Volatile private var socket: java.io.Closeable? = null
     @Volatile private var inp: DataInputStream? = null
     @Volatile private var out: DataOutputStream? = null
     @Volatile private var tcp: Socket? = null
@@ -136,27 +136,64 @@ object LinkClient {
                 }
             }
             if (s == null) throw (lastErr ?: IOException("connect failed"))
-            val i = DataInputStream(BufferedInputStream(s.inputStream, P.BUF))
-            val o = DataOutputStream(BufferedOutputStream(s.outputStream, P.BUF))
-            o.writeInt(P.MAGIC); o.writeInt(P.HELLO); o.writeUTF(android.os.Build.MODEL); o.flush()
-            state.value = ClientState.Waiting(name)
-            val r = i.readInt()
-            if (r != P.OK) {
-                try { s.close() } catch (_: Exception) {}
-                state.value = ClientState.Failed("الهاتف الآخر رفض الاتصال أو لم يرد في الوقت المحدد")
-                return@withContext false
-            }
-            socket = s; inp = i; out = o
-            thumbs.evictAll()
-            completed.value = emptySet()
-            transfer.value = null
-            state.value = ClientState.Connected(name)
-            true
+            finishHandshake(s, s.inputStream, s.outputStream, name,
+                "تعذّر الاتصال بالهاتف التاني. تأكد إنه مقترن، وإن التطبيق مثبّت عليه ومفتوح مرة واحدة على الأقل، وإن الإشعار \"الاستقبال شغال\" ظاهر هناك.")
         } catch (e: Exception) {
             try { s?.close() } catch (_: Exception) {}
             state.value = ClientState.Failed("تعذّر الاتصال بالهاتف التاني. تأكد إنه مقترن، وإن التطبيق مثبّت عليه ومفتوح مرة واحدة على الأقل، وإن الإشعار \"الاستقبال شغال\" ظاهر هناك. (${e.message})")
             false
         }
+    }
+
+    /** Connects over a plain IP address/hostname instead of Bluetooth — works over any routed network, including a Tailscale (or other VPN) virtual interface, so the two phones don't need to be nearby or on the same Wi-Fi. */
+    fun connectRemoteAsync(ctx: Context, host: String, name: String) {
+        val app = ctx.applicationContext
+        scope.launch {
+            if (connectRemote(host, name)) {
+                withContext(Dispatchers.Main) {
+                    try { app.startForegroundService(Intent(app, LinkService::class.java).setAction(LinkService.ACT_CLIENT)) } catch (_: Exception) {}
+                }
+            }
+        }
+    }
+
+    private suspend fun connectRemote(host: String, name: String): Boolean = withContext(Dispatchers.IO) {
+        val cur = state.value
+        if (cur is ClientState.Connected || cur is ClientState.Connecting || cur is ClientState.Waiting) return@withContext false
+        state.value = ClientState.Connecting(name)
+        var s: Socket? = null
+        try {
+            val sock = Socket()
+            sock.connect(InetSocketAddress(host, P.TCP_PORT), 8000)
+            sock.tcpNoDelay = true
+            s = sock
+            finishHandshake(sock, sock.getInputStream(), sock.getOutputStream(), name,
+                "تعذّر الاتصال بـ $host. تأكد إن Tailscale شغال ومتصل على الهاتفين، وإن العنوان صح، وإن تطبيق Bluetooth Link مفتوح مرة على الهاتف التاني.")
+        } catch (e: Exception) {
+            try { s?.close() } catch (_: Exception) {}
+            state.value = ClientState.Failed("تعذّر الاتصال بـ $host. تأكد إن Tailscale شغال ومتصل على الهاتفين. (${e.message})")
+            false
+        }
+    }
+
+    /** Shared handshake: write HELLO, wait for the other phone's consent, and (on success) adopt this transport as the active session — used by both the Bluetooth and the plain-IP/Tailscale paths. */
+    private fun finishHandshake(closeable: java.io.Closeable, insRaw: java.io.InputStream, outsRaw: java.io.OutputStream, name: String, rejectMsg: String): Boolean {
+        val i = DataInputStream(BufferedInputStream(insRaw, P.BUF))
+        val o = DataOutputStream(BufferedOutputStream(outsRaw, P.BUF))
+        o.writeInt(P.MAGIC); o.writeInt(P.HELLO); o.writeUTF(android.os.Build.MODEL); o.flush()
+        state.value = ClientState.Waiting(name)
+        val r = i.readInt()
+        if (r != P.OK) {
+            try { closeable.close() } catch (_: Exception) {}
+            state.value = ClientState.Failed(rejectMsg)
+            return false
+        }
+        socket = closeable; inp = i; out = o
+        thumbs.evictAll()
+        completed.value = emptySet()
+        transfer.value = null
+        state.value = ClientState.Connected(name)
+        return true
     }
 
     fun upgradeAsync(ctx: Context) {

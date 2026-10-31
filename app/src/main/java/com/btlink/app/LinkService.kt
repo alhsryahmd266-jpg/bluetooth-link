@@ -51,6 +51,7 @@ import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.File
 import java.io.InputStream
+import java.io.Closeable
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CompletableFuture
@@ -77,7 +78,9 @@ class LinkService : Service() {
     @Volatile private var listening = false
     @Volatile private var started = false
     private var serverSocket: BluetoothServerSocket? = null
-    @Volatile private var active: BluetoothSocket? = null
+    @Volatile private var active: Closeable? = null
+    @Volatile private var remoteServer: ServerSocket? = null
+    @Volatile private var remoteListening = false
     @Volatile private var decision: CompletableFuture<Boolean>? = null
     private var p2pCh: WifiP2pManager.Channel? = null
     private var tcpServer: ServerSocket? = null
@@ -194,44 +197,64 @@ class LinkService : Service() {
     // ---------------- listening ----------------
 
     private fun startListening() {
-        if (listening) return
-        val adapter = (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
-        if (adapter == null || !adapter.isEnabled) {
-            Hub.serverMsg.value = "البلوتوث مقفول"
-            Hub.server.value = ServerState.Off
-            return
-        }
-        Hub.serverMsg.value = null
-        listening = true
-        Hub.server.value = ServerState.Listening
-        thread(name = "bt-accept") {
-            try {
-                val ss = adapter.listenUsingRfcommWithServiceRecord("BluetoothLink", P.APP_UUID)
-                serverSocket = ss
-                while (listening) {
-                    val s = ss.accept()
-                    if (active != null) {
-                        try { s.close() } catch (_: Exception) {}
-                        continue
+        if (!listening) {
+            val adapter = (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
+            if (adapter == null || !adapter.isEnabled) {
+                Hub.serverMsg.value = "البلوتوث مقفول"
+            } else {
+                Hub.serverMsg.value = null
+                listening = true
+                thread(name = "bt-accept") {
+                    try {
+                        val ss = adapter.listenUsingRfcommWithServiceRecord("BluetoothLink", P.APP_UUID)
+                        serverSocket = ss
+                        while (listening) {
+                            val s = ss.accept()
+                            acceptSession(s, s.inputStream, s.outputStream)
+                        }
+                    } catch (e: Exception) {
+                        if (listening) Hub.serverMsg.value = "تعذر تشغيل الاستقبال: ${e.message}"
+                    } finally {
+                        listening = false
+                        try { serverSocket?.close() } catch (_: Exception) {}
+                        serverSocket = null
+                        if (active == null) Hub.server.value = ServerState.Off
                     }
-                    active = s
-                    thread(name = "bt-session") { handle(s) }
                 }
-            } catch (e: Exception) {
-                if (listening) Hub.serverMsg.value = "تعذر تشغيل الاستقبال: ${e.message}"
+            }
+        }
+        startRemoteListening()
+        if (Hub.server.value == ServerState.Off && (listening || remoteListening)) Hub.server.value = ServerState.Listening
+    }
+
+    /** Always-on plain TCP listener, reachable over any IP network that routes to this device — including a Tailscale / VPN virtual interface, with no extra setup beyond both phones joining the same tailnet. */
+    private fun startRemoteListening() {
+        if (remoteListening) return
+        remoteListening = true
+        thread(name = "remote-accept") {
+            try {
+                val ss = ServerSocket(P.TCP_PORT)
+                remoteServer = ss
+                while (remoteListening) {
+                    val s = ss.accept()
+                    s.tcpNoDelay = true
+                    acceptSession(s, s.getInputStream(), s.getOutputStream())
+                }
+            } catch (_: Exception) {
             } finally {
-                listening = false
-                try { serverSocket?.close() } catch (_: Exception) {}
-                serverSocket = null
-                if (active == null) Hub.server.value = ServerState.Off
+                remoteListening = false
+                try { remoteServer?.close() } catch (_: Exception) {}
+                remoteServer = null
             }
         }
     }
 
     private fun stopListening() {
         listening = false
+        remoteListening = false
         decision?.complete(false)
         try { serverSocket?.close() } catch (_: Exception) {}
+        try { remoteServer?.close() } catch (_: Exception) {}
         try { active?.close() } catch (_: Exception) {}
         cleanupWifi()
         Hub.server.value = ServerState.Off
@@ -239,10 +262,19 @@ class LinkService : Service() {
 
     // ---------------- session ----------------
 
-    private fun handle(s: BluetoothSocket) {
+    private fun acceptSession(closeable: Closeable, insRaw: java.io.InputStream, outsRaw: java.io.OutputStream) {
+        if (active != null) {
+            try { closeable.close() } catch (_: Exception) {}
+            return
+        }
+        active = closeable
+        thread(name = "bl-session") { handle(closeable, insRaw, outsRaw) }
+    }
+
+    private fun handle(closeable: Closeable, insRaw: java.io.InputStream, outsRaw: java.io.OutputStream) {
         try {
-            val inp = DataInputStream(BufferedInputStream(s.inputStream, P.BUF))
-            val out = DataOutputStream(BufferedOutputStream(s.outputStream, P.BUF))
+            val inp = DataInputStream(BufferedInputStream(insRaw, P.BUF))
+            val out = DataOutputStream(BufferedOutputStream(outsRaw, P.BUF))
             if (inp.readInt() != P.MAGIC || inp.readInt() != P.HELLO) return
             val remote = inp.readUTF()
             val fut = CompletableFuture<Boolean>()
@@ -258,11 +290,11 @@ class LinkService : Service() {
             serve(inp, out)
         } catch (_: Exception) {
         } finally {
-            try { s.close() } catch (_: Exception) {}
+            try { closeable.close() } catch (_: Exception) {}
             cleanupWifi()
             active = null
             nm.cancel(NID_REQ)
-            Hub.server.value = if (listening) ServerState.Listening else ServerState.Off
+            Hub.server.value = if (listening || remoteListening) ServerState.Listening else ServerState.Off
         }
     }
 
