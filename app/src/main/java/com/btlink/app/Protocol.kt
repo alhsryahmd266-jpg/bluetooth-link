@@ -29,7 +29,7 @@ object P {
 sealed class ServerState {
     object Off : ServerState()
     object Listening : ServerState()
-    data class Pending(val name: String) : ServerState()
+    data class Pending(val name: String, val address: String? = null) : ServerState()
     data class Connected(val name: String) : ServerState()
 }
 
@@ -56,3 +56,17 @@ object MirrorBridge {
 }
 
 data class RemoteContact(val name: String, val numbers: List<String>)
+
+fun isTrustedDevice(c: Context, address: String): Boolean =
+    c.getSharedPreferences("btlink", 0).getStringSet("trusted_devices", emptySet())?.contains(address) == true
+
+fun addTrustedDevice(c: Context, address: String) {
+    val p = c.getSharedPreferences("btlink", 0)
+    val cur = HashSet(p.getStringSet("trusted_devices", emptySet()) ?: emptySet())
+    cur.add(address)
+    p.edit().putStringSet("trusted_devices", cur).apply()
+}
+
+fun clearTrustedDevices(c: Context) {
+    c.getSharedPreferences("btlink", 0).edit().remove("trusted_devices").apply()
+}

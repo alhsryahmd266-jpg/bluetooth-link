@@ -233,13 +233,30 @@ fun App(act: MainActivity) {
     }
     val s = srv
     if (s is ServerState.Pending) {
+        var remember by remember(s) { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = {},
             containerColor = CSurf,
             icon = { Icon(Icons.Rounded.Shield, null, tint = CCyan) },
             title = { Text("طلب اتصال بلوتوث", color = Color.White) },
-            text = { Text("الهاتف \"${s.name}\" يطلب الاتصال بهذا الهاتف وسحب ملفات منه طول هذه الجلسة. هل توافق؟", color = CDim) },
-            confirmButton = { Button(onClick = { sendSvc(ctx, LinkService.ACT_ALLOW) }) { Text("موافق") } },
+            text = {
+                Column {
+                    Text("الهاتف \"${s.name}\" يطلب الاتصال بهذا الهاتف وسحب ملفات منه طول هذه الجلسة. هل توافق؟", color = CDim)
+                    if (s.address != null) {
+                        Spacer(Modifier.height(14.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { remember = !remember }) {
+                            Box(Modifier.size(22.dp).clip(RoundedCornerShape(5.dp)).background(if (remember) CCyan else CCard), contentAlignment = Alignment.Center) {
+                                if (remember) Icon(Icons.Rounded.Check, null, tint = Color.Black, modifier = Modifier.size(14.dp))
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Text("تذكر هذا الهاتف ولا تسألني تاني", color = Color.White, fontSize = 13.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { sendSvc(ctx, if (remember) LinkService.ACT_ALLOW_REMEMBER else LinkService.ACT_ALLOW) }) { Text("موافق") }
+            },
             dismissButton = { TextButton(onClick = { sendSvc(ctx, LinkService.ACT_DENY) }) { Text("رفض", color = CRed) } }
         )
     }
@@ -448,7 +465,10 @@ fun Dashboard(act: MainActivity) {
         Spacer(Modifier.height(12.dp))
         OutlinedButton(onClick = { try { ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) } catch (_: Exception) {} }) { Text("إقران هاتف جديد") }
 
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(12.dp))
+        TextButton(onClick = { clearTrustedDevices(ctx) }) { Text("نسيان كل الأجهزة الموثوقة (رجّع سؤال الموافقة للكل)", color = CDim, fontSize = 12.sp) }
+
+        Spacer(Modifier.height(16.dp))
         RemoteConnectCard(busy)
 
         Spacer(Modifier.height(24.dp))
@@ -709,7 +729,7 @@ fun MediaTab(kind: Int) {
                         val key = "m:$kind:${m.id}"
                         Box(
                             Modifier.aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(CCard)
-                                .clickable { LinkClient.pullMedia(ctx, kind, m.id) }
+                                .clickable { LinkClient.pullMedia(ctx, kind, m.id, autoOpen = true) }
                         ) {
                             Thumb(kind, m.id, Modifier.fillMaxSize())
                             Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000)))).padding(6.dp)) {
@@ -726,7 +746,7 @@ fun MediaTab(kind: Int) {
                 LazyColumn(Modifier.fillMaxSize()) {
                     items(list, key = { it.id }) { m ->
                         val key = "m:$kind:${m.id}"
-                        FileRow(m.name, formatSize(m.size), Icons.Rounded.MusicNote, key in completed) { LinkClient.pullMedia(ctx, kind, m.id) }
+                        FileRow(m.name, formatSize(m.size), Icons.Rounded.MusicNote, key in completed) { LinkClient.pullMedia(ctx, kind, m.id, autoOpen = true) }
                     }
                 }
             }
@@ -803,7 +823,7 @@ fun FilesTab() {
             items(list, key = { it.name }) { f ->
                 val full = (c ?: "") + "/" + f.name
                 if (f.isDir) FileRow(f.name, "مجلد", Icons.Rounded.Folder, false) { path = full }
-                else FileRow(f.name, formatSize(f.size), Icons.Rounded.InsertDriveFile, "f:$full" in completed) { LinkClient.pullFile(ctx, full) }
+                else FileRow(f.name, formatSize(f.size), Icons.Rounded.InsertDriveFile, "f:$full" in completed) { LinkClient.pullFile(ctx, full, autoOpen = true) }
             }
         }
     }

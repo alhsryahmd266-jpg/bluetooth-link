@@ -64,6 +64,7 @@ class LinkService : Service() {
         const val ACT_START = "com.btlink.START"
         const val ACT_STOP = "com.btlink.STOP"
         const val ACT_ALLOW = "com.btlink.ALLOW"
+        const val ACT_ALLOW_REMEMBER = "com.btlink.ALLOW_REMEMBER"
         const val ACT_DENY = "com.btlink.DENY"
         const val ACT_DISCONNECT = "com.btlink.DISCONNECT"
         const val ACT_CLIENT = "com.btlink.CLIENT"
@@ -82,6 +83,7 @@ class LinkService : Service() {
     @Volatile private var remoteServer: ServerSocket? = null
     @Volatile private var remoteListening = false
     @Volatile private var decision: CompletableFuture<Boolean>? = null
+    @Volatile private var pendingAddr: String? = null
     private var p2pCh: WifiP2pManager.Channel? = null
     private var tcpServer: ServerSocket? = null
     @Volatile private var tcp: Socket? = null
@@ -117,6 +119,7 @@ class LinkService : Service() {
             ACT_CLIENT -> { if (goForeground()) started = true }
             ACT_STOP -> stopListening()
             ACT_ALLOW -> decision?.complete(true)
+            ACT_ALLOW_REMEMBER -> { pendingAddr?.let { addTrustedDevice(this, it) }; decision?.complete(true) }
             ACT_DENY -> decision?.complete(false)
             ACT_DISCONNECT -> {
                 try { active?.close() } catch (_: Exception) {}
@@ -277,13 +280,29 @@ class LinkService : Service() {
             val out = DataOutputStream(BufferedOutputStream(outsRaw, P.BUF))
             if (inp.readInt() != P.MAGIC || inp.readInt() != P.HELLO) return
             val remote = inp.readUTF()
-            val fut = CompletableFuture<Boolean>()
-            decision = fut
-            Hub.server.value = ServerState.Pending(remote)
-            showRequest(remote)
-            val ok = try { fut.get(60, TimeUnit.SECONDS) } catch (_: Exception) { false }
-            nm.cancel(NID_REQ)
-            decision = null
+            val addr = (closeable as? BluetoothSocket)?.remoteDevice?.address
+
+            val ok: Boolean
+            if (addr != null && isTrustedDevice(this, addr)) {
+                // Trusted device from a previous session: skip the prompt, but still tell the person it connected.
+                ok = true
+                Hub.server.value = ServerState.Connected(remote)
+                try {
+                    nm.notify(NID, NotificationCompat.Builder(this, CH).setSmallIcon(R.drawable.ic_bt)
+                        .setContentTitle("Bluetooth Link").setContentText("اتصال تلقائي من جهاز موثوق: $remote")
+                        .setOngoing(true).setContentIntent(openApp()).build())
+                } catch (_: Exception) {}
+            } else {
+                val fut = CompletableFuture<Boolean>()
+                decision = fut
+                pendingAddr = addr
+                Hub.server.value = ServerState.Pending(remote, addr)
+                showRequest(remote)
+                ok = try { fut.get(60, TimeUnit.SECONDS) } catch (_: Exception) { false }
+                nm.cancel(NID_REQ)
+                decision = null
+                pendingAddr = null
+            }
             out.writeInt(if (ok) P.OK else P.ERR); out.flush()
             if (!ok) { Thread.sleep(300); return }
             Hub.server.value = ServerState.Connected(remote)

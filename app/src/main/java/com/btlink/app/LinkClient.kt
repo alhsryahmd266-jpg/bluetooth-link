@@ -474,23 +474,23 @@ object LinkClient {
         return bmp
     }
 
-    fun pullMedia(ctx: Context, kind: Int, id: Long): Job =
-        enqueue(ctx, "m:$kind:$id") { o -> o.writeInt(P.PULL_MEDIA); o.writeInt(kind); o.writeLong(id) }
+    fun pullMedia(ctx: Context, kind: Int, id: Long, autoOpen: Boolean = false): Job =
+        enqueue(ctx, "m:$kind:$id", autoOpen) { o -> o.writeInt(P.PULL_MEDIA); o.writeInt(kind); o.writeLong(id) }
 
-    fun pullFile(ctx: Context, path: String): Job =
-        enqueue(ctx, "f:$path") { o -> o.writeInt(P.PULL_FILE); o.writeUTF(path) }
+    fun pullFile(ctx: Context, path: String, autoOpen: Boolean = false): Job =
+        enqueue(ctx, "f:$path", autoOpen) { o -> o.writeInt(P.PULL_FILE); o.writeUTF(path) }
 
     fun pullContacts(ctx: Context): Job =
-        enqueue(ctx, "contacts") { o -> o.writeInt(P.CONTACTS) }
+        enqueue(ctx, "contacts", false) { o -> o.writeInt(P.CONTACTS) }
 
-    private fun enqueue(ctx: Context, key: String, req: (DataOutputStream) -> Unit): Job {
+    private fun enqueue(ctx: Context, key: String, autoOpen: Boolean, req: (DataOutputStream) -> Unit): Job {
         val app = ctx.applicationContext
         queued.update { it + 1 }
         return scope.launch {
             try {
                 call { i, o ->
                     req(o); o.flush()
-                    receive(app, i)
+                    receive(app, i, autoOpen)
                 }
                 completed.update { it + key }
             } catch (e: RemoteError) {
@@ -503,7 +503,7 @@ object LinkClient {
         }
     }
 
-    private fun receive(ctx: Context, i: DataInputStream) {
+    private fun receive(ctx: Context, i: DataInputStream, autoOpen: Boolean = false) {
         if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
         val name = i.readUTF()
         val mime = i.readUTF()
@@ -584,5 +584,13 @@ object LinkClient {
         }
         val dt = maxOf(1L, SystemClock.elapsedRealtime() - t0)
         transfer.value = Transfer(name, size, size, size * 1000.0 / dt, 1, "", finalUri, mime)
+        if (autoOpen && finalUri != null) {
+            try {
+                ctx.startActivity(
+                    Intent(Intent.ACTION_VIEW).setDataAndType(finalUri, mime)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } catch (_: Exception) {}
+        }
     }
 }
