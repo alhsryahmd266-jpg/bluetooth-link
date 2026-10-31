@@ -326,6 +326,52 @@ object LinkClient {
         if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
     }
 
+    suspend fun listContacts(): List<RemoteContact> = call { i, o ->
+        o.writeInt(P.CONTACTS_LIST); o.flush()
+        if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
+        val n = i.readInt()
+        List(n) {
+            val name = i.readUTF()
+            val cnt = i.readInt()
+            RemoteContact(name, List(cnt) { i.readUTF() })
+        }
+    }
+
+    /** Builds and saves a vCard containing only the contacts the user picked — entirely from data already fetched, no extra device trip. */
+    fun saveSelectedContacts(ctx: Context, selected: List<RemoteContact>) {
+        val sb = StringBuilder()
+        for (c in selected) {
+            sb.append("BEGIN:VCARD\nVERSION:3.0\nFN:").append(c.name).append('\n')
+            for (p in c.numbers) sb.append("TEL:").append(p).append('\n')
+            sb.append("END:VCARD\n")
+        }
+        val bytes = sb.toString().toByteArray(Charsets.UTF_8)
+        val name = "contacts_${selected.size}.vcf"
+        val mime = "text/x-vcard"
+        val resolver = ctx.contentResolver
+        var uri: Uri? = null
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                val cv = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/BluetoothLink")
+                }
+                uri = resolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), cv)
+                uri?.let { resolver.openOutputStream(it)?.use { os -> os.write(bytes) } }
+            } else {
+                val dir = java.io.File(Environment.getExternalStorageDirectory(), "Download/BluetoothLink").apply { mkdirs() }
+                val f = java.io.File(dir, name)
+                f.writeBytes(bytes)
+                try { MediaScannerConnection.scanFile(ctx, arrayOf(f.absolutePath), arrayOf(mime), null) } catch (_: Exception) {}
+                uri = try { FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", f) } catch (_: Exception) { null }
+            }
+            transfer.value = Transfer(name, bytes.size.toLong(), bytes.size.toLong(), 0.0, 1, "", uri, mime)
+        } catch (e: Exception) {
+            transfer.value = Transfer(name, 0, 0, 0.0, 2, "فشل حفظ ملف جهات الاتصال: ${e.message}")
+        }
+    }
+
     fun disconnect() {
         scope.launch(Dispatchers.IO) {
             try { out?.let { it.writeInt(P.BYE); it.flush() } } catch (_: Exception) {}

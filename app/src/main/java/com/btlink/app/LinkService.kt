@@ -282,6 +282,7 @@ class LinkService : Service() {
                     P.APP_LIST -> appsList(out)
                     P.APP_LAUNCH -> appLaunch(inp.readUTF(), out)
                     P.APP_UNINSTALL -> appUninstall(inp.readUTF(), out)
+                    P.CONTACTS_LIST -> contactsList(out)
                     else -> return
                 }
             } catch (e: java.io.IOException) {
@@ -628,6 +629,27 @@ class LinkService : Service() {
         ins.use {
             out.writeInt(P.OK); out.writeUTF(name); out.writeUTF(mime); out.writeLong(size)
             sendStream(it, out, size)
+        }
+    }
+
+    private fun contactsList(out: DataOutputStream) {
+        val map = LinkedHashMap<String, MutableSet<String>>()
+        try {
+            val proj = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER)
+            contentResolver.query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI, proj, null, null, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)?.use { c ->
+                while (c.moveToNext()) {
+                    val n = c.getString(0) ?: continue
+                    val p = c.getString(1) ?: continue
+                    map.getOrPut(n) { LinkedHashSet() }.add(p)
+                }
+            }
+        } catch (e: Exception) {
+            err(out, "لا يوجد إذن قراءة جهات الاتصال على الهاتف المستقبل"); return
+        }
+        out.writeInt(P.OK); out.writeInt(map.size)
+        for ((n, nums) in map) {
+            out.writeUTF(n); out.writeInt(nums.size)
+            for (p in nums) out.writeUTF(p)
         }
     }
 

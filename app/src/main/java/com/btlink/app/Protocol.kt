@@ -17,6 +17,7 @@ object P {
     const val APP_LIST = 11
     const val APP_LAUNCH = 12
     const val APP_UNINSTALL = 13
+    const val CONTACTS_LIST = 14
     const val UPGRADE = 8
     const val BYE = 9
     const val OK = 0
@@ -52,3 +53,5 @@ data class RemoteApp(val label: String, val pkg: String, val system: Boolean)
 object MirrorBridge {
     @Volatile var pending: java.util.concurrent.CompletableFuture<Pair<Int, android.content.Intent?>>? = null
 }
+
+data class RemoteContact(val name: String, val numbers: List<String>)

@@ -185,6 +185,30 @@ fun pulse(from: Float = 0.55f, to: Float = 1f, ms: Int = 900): Float {
     return v
 }
 
+fun openOemAutostart(ctx: Context) {
+    val candidates = listOf(
+        "com.coloros.safecenter" to "com.coloros.safecenter.permission.startupapp.StartupAppListActivity",
+        "com.coloros.safecenter" to "com.coloros.safecenter.startupapp.StartupAppListActivity",
+        "com.oppo.safe" to "com.oppo.safe.permission.startup.StartupAppListActivity",
+        "com.miui.securitycenter" to "com.miui.permcenter.autostart.AutoStartManagementActivity",
+        "com.huawei.systemmanager" to "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+        "com.huawei.systemmanager" to "com.huawei.systemmanager.optimize.process.ProtectActivity",
+        "com.vivo.permissionmanager" to "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+        "com.iqoo.secure" to "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity",
+        "com.letv.android.letvsafe" to "com.letv.android.letvsafe.AutobootManageActivity",
+        "com.asus.mobilemanager" to "com.asus.mobilemanager.autostart.AutoStartActivity"
+    )
+    for ((pkg, cls) in candidates) {
+        try {
+            ctx.startActivity(Intent().setClassName(pkg, cls).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return
+        } catch (_: Exception) {}
+    }
+    try {
+        ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (_: Exception) {}
+}
+
 fun startRx(ctx: Context) {
     try {
         ctx.startForegroundService(Intent(ctx, LinkService::class.java).setAction(LinkService.ACT_START))
@@ -323,6 +347,13 @@ fun Dashboard(act: MainActivity) {
             OutlinedButton(onClick = {
                 try { ctx.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))) } catch (_: Exception) {}
             }) { Text("السماح بالعمل في الخلفية") }
+        }
+        val manu = Build.MANUFACTURER.lowercase()
+        if (manu.contains("oppo") || manu.contains("realme") || manu.contains("oneplus") || manu.contains("xiaomi") || manu.contains("redmi") || manu.contains("huawei") || manu.contains("honor") || manu.contains("vivo")) {
+            Spacer(Modifier.height(12.dp))
+            Warn("هواتف ${Build.MANUFACTURER} بتقفل التطبيقات اللي في الخلفية بقوة زيادة، وده بيقطع الاتصال لو خرجت من التطبيق. لازم تفتح إعداد خاص بالشركة وتسمح للتطبيق يشتغل في الخلفية.")
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = { openOemAutostart(ctx) }) { Text("فتح إعداد الشركة المصنّعة") }
         }
         if (!allFiles) {
             Spacer(Modifier.height(12.dp)); Warn("عشان الهاتف الرئيسي يتصفح ملفات هذا الهاتف، فعّل \"الوصول لكل الملفات\" (الصور والفيديو شغالة بدونه).")
@@ -729,16 +760,59 @@ fun FilesTab() {
 @Composable
 fun ContactsTab() {
     val ctx = LocalContext.current
-    val completed by LinkClient.completed.collectAsState()
-    Column(Modifier.fillMaxSize().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-        Icon(Icons.Rounded.Contacts, null, tint = CCyan, modifier = Modifier.size(64.dp))
-        Spacer(Modifier.height(16.dp))
-        Text("جهات الاتصال والأرقام", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(8.dp))
-        Text("اسحب كل الأسماء والأرقام من الهاتف التاني في ملف واحد (vCard) تفتحه وتستورده في جهات الاتصال.", color = CDim, textAlign = TextAlign.Center, lineHeight = 21.sp)
-        Spacer(Modifier.height(22.dp))
-        Button(onClick = { LinkClient.pullContacts(ctx) }, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp)) {
-            Text(if ("contacts" in completed) "تم! اسحب مرة تانية" else "سحب جهات الاتصال", fontWeight = FontWeight.Bold)
+    var contacts by remember { mutableStateOf<List<RemoteContact>?>(null) }
+    var err by remember { mutableStateOf<String?>(null) }
+    var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    LaunchedEffect(Unit) {
+        try { contacts = LinkClient.listContacts() } catch (e: Exception) { err = e.message ?: "خطأ" }
+    }
+
+    val list = contacts
+    val e = err
+    when {
+        e != null -> Msg(e)
+        list == null -> Loading()
+        list.isEmpty() -> Msg("مفيش جهات اتصال على الهاتف التاني")
+        else -> Column(Modifier.fillMaxSize()) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("${selected.size} من ${list.size} محدد", color = CDim, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                TextButton(onClick = {
+                    selected = if (selected.size == list.size) emptySet() else list.map { it.name + it.numbers.joinToString() }.toSet()
+                }) { Text(if (selected.size == list.size) "إلغاء الكل" else "تحديد الكل", fontSize = 13.sp) }
+            }
+            LazyColumn(Modifier.weight(1f)) {
+                items(list, key = { it.name + it.numbers.joinToString() }) { c ->
+                    val key = c.name + c.numbers.joinToString()
+                    val checked = key in selected
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .clickable { selected = if (checked) selected - key else selected + key }
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            Modifier.size(24.dp).clip(CircleShape)
+                                .background(if (checked) CCyan else CCard),
+                            contentAlignment = Alignment.Center
+                        ) { if (checked) Icon(Icons.Rounded.Check, null, tint = Color.Black, modifier = Modifier.size(16.dp)) }
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(c.name, color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(c.numbers.joinToString("، "), color = CDim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            }
+            Button(
+                onClick = {
+                    val picked = list.filter { (it.name + it.numbers.joinToString()) in selected }
+                    if (picked.isNotEmpty()) LinkClient.saveSelectedContacts(ctx, picked)
+                },
+                enabled = selected.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth().padding(14.dp).height(50.dp),
+                shape = RoundedCornerShape(14.dp)
+            ) { Text(if (selected.isEmpty()) "اختار جهات اتصال الأول" else "سحب ${selected.size} جهة اتصال محددة", fontWeight = FontWeight.Bold) }
         }
     }
 }
