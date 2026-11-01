@@ -24,28 +24,30 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build release APK
+      - name: Build release APKs (controller + receiver-only)
         shell: bash
         run: |
           set -o pipefail
-          gradle assembleRelease --no-daemon --console=plain --stacktrace 2>&1 | tee build.log
+          gradle :app:assembleRelease :lite:assembleRelease --no-daemon --console=plain --stacktrace 2>&1 | tee build.log
 
-      - name: Publish release with APK
+      - name: Publish release with both APKs
         if: success()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp app/build/outputs/apk/release/app-release.apk BluetoothLink.apk
+          cp lite/build/outputs/apk/release/lite-release.apk BluetoothLinkReceiver.apk
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest BluetoothLink.apk \
+          gh release create latest BluetoothLink.apk BluetoothLinkReceiver.apk \
             --title "Bluetooth Link (latest)" \
-            --notes "Latest build of Bluetooth Link. Download BluetoothLink.apk and install it on both phones."
+            --notes "BluetoothLink.apk = controller app (phone 1). BluetoothLinkReceiver.apk = receiver-only app (phone 2/3)."
 
       - name: Publish download page (GitHub Pages)
         if: success()
         run: |
           mkdir site
           cp BluetoothLink.apk site/BluetoothLink.apk
+          cp BluetoothLinkReceiver.apk site/BluetoothLinkReceiver.apk
           cat > site/index.html <<'HTML'
           <!doctype html>
           <html lang="ar" dir="rtl"><head><meta charset="utf-8">
@@ -53,15 +55,21 @@ jobs:
           <title>Bluetooth Link</title>
           <style>
           body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#070b14;color:#fff;font-family:system-ui,sans-serif;text-align:center}
-          .c{padding:24px;max-width:420px}
-          a.b{display:block;margin-top:24px;padding:18px;border-radius:16px;background:linear-gradient(135deg,#22d3ee,#6366f1);color:#fff;font-size:20px;font-weight:700;text-decoration:none}
-          p{color:#8b9bb8;line-height:1.7}
+          .c{padding:24px;max-width:460px}
+          a.b{display:block;margin-top:18px;padding:18px;border-radius:16px;color:#fff;font-size:18px;font-weight:700;text-decoration:none}
+          a.main{background:linear-gradient(135deg,#22d3ee,#6366f1)}
+          a.rx{background:linear-gradient(135deg,#6366f1,#a855f7)}
+          p{color:#8b9bb8;line-height:1.7;margin-top:6px}
+          h2{margin-top:28px;margin-bottom:0;font-size:16px}
           </style></head><body><div class="c">
           <h1>Bluetooth Link</h1>
-          <p>جاري تنزيل التطبيق... لو ما بدأش التنزيل اضغط الزر.</p>
-          <a class="b" href="BluetoothLink.apk" download>تنزيل التطبيق (APK)</a>
+          <h2>الهاتف الرئيسي (اللي هتتحكم منه)</h2>
+          <p>ثبّته على هاتفك الرئيسي بس</p>
+          <a class="b main" href="BluetoothLink.apk" download>تنزيل تطبيق التحكم</a>
+          <h2>الهاتف التاني (اللي هيتحكم فيه)</h2>
+          <p>تطبيق صغير للموافقة والاستقبال بس — ثبّته على باقي هواتفك</p>
+          <a class="b rx" href="BluetoothLinkReceiver.apk" download>تنزيل تطبيق الاستقبال</a>
           </div>
-          <script>setTimeout(function(){location.href='BluetoothLink.apk'},800)</script>
           </body></html>
           HTML
           cd site

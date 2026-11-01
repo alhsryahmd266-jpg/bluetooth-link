@@ -334,6 +334,8 @@ class LinkService : Service() {
                     P.APP_LAUNCH -> appLaunch(inp.readUTF(), out)
                     P.APP_UNINSTALL -> appUninstall(inp.readUTF(), out)
                     P.CONTACTS_LIST -> contactsList(out)
+                    P.DELETE_MEDIA -> deleteMedia(inp.readInt(), inp.readLong(), out)
+                    P.DELETE_FILE -> deleteFile(inp.readUTF(), out)
                     else -> return
                 }
             } catch (e: java.io.IOException) {
@@ -681,6 +683,22 @@ class LinkService : Service() {
             out.writeInt(P.OK); out.writeUTF(name); out.writeUTF(mime); out.writeLong(size)
             sendStream(it, out, size)
         }
+    }
+
+    private fun deleteMedia(kind: Int, id: Long, out: DataOutputStream) {
+        try {
+            val uri = ContentUris.withAppendedId(collection(kind), id)
+            val n = contentResolver.delete(uri, null, null)
+            if (n > 0) out.writeInt(P.OK) else err(out, "الملف غير موجود أو تم حذفه بالفعل")
+        } catch (e: Exception) {
+            err(out, "تعذر الحذف: ${e.message}")
+        }
+    }
+
+    private fun deleteFile(path: String, out: DataOutputStream) {
+        val f = safe(path)
+        if (f == null || !f.isFile || !allFilesOk()) { err(out, "الملف غير متاح للحذف"); return }
+        if (f.delete()) out.writeInt(P.OK) else err(out, "تعذر حذف الملف")
     }
 
     private fun contactsList(out: DataOutputStream) {

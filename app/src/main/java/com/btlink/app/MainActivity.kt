@@ -699,17 +699,21 @@ fun Loading() {
 @Composable
 fun MediaTab(kind: Int) {
     val ctx = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var items by remember(kind) { mutableStateOf<List<RemoteMedia>?>(null) }
     var err by remember(kind) { mutableStateOf<String?>(null) }
     val completed by LinkClient.completed.collectAsState()
     var confirmAll by remember(kind) { mutableStateOf(false) }
+    var picked by remember(kind) { mutableStateOf<RemoteMedia?>(null) }
+    var deleteMsg by remember(kind) { mutableStateOf<String?>(null) }
+    var deletedIds by remember(kind) { mutableStateOf<Set<Long>>(emptySet()) }
 
     LaunchedEffect(kind) {
         items = null; err = null
         try { items = LinkClient.listMedia(kind, 0, 400) } catch (e: Exception) { err = e.message ?: "خطأ" }
     }
 
-    val list = items
+    val list = items?.filter { it.id !in deletedIds }
     val e = err
     when {
         e != null -> Msg(e)
@@ -729,7 +733,7 @@ fun MediaTab(kind: Int) {
                         val key = "m:$kind:${m.id}"
                         Box(
                             Modifier.aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(CCard)
-                                .clickable { LinkClient.pullMedia(ctx, kind, m.id, autoOpen = true) }
+                                .clickable { picked = m }
                         ) {
                             Thumb(kind, m.id, Modifier.fillMaxSize())
                             Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000)))).padding(6.dp)) {
@@ -746,7 +750,7 @@ fun MediaTab(kind: Int) {
                 LazyColumn(Modifier.fillMaxSize()) {
                     items(list, key = { it.id }) { m ->
                         val key = "m:$kind:${m.id}"
-                        FileRow(m.name, formatSize(m.size), Icons.Rounded.MusicNote, key in completed) { LinkClient.pullMedia(ctx, kind, m.id, autoOpen = true) }
+                        FileRow(m.name, formatSize(m.size), Icons.Rounded.MusicNote, key in completed) { picked = m }
                     }
                 }
             }
@@ -760,6 +764,36 @@ fun MediaTab(kind: Int) {
             text = { Text("هيتم سحب ${list.size} عنصر (${formatSize(list.sumOf { it.size })}) بالترتيب. البلوتوث أبطأ من الواي فاي، فالحجم الكبير ياخد وقت.", color = CDim) },
             confirmButton = { Button(onClick = { confirmAll = false; list.forEach { LinkClient.pullMedia(ctx, kind, it.id) } }) { Text("ابدأ السحب") } },
             dismissButton = { TextButton(onClick = { confirmAll = false }) { Text("إلغاء") } }
+        )
+    }
+
+    picked?.let { m ->
+        AlertDialog(
+            onDismissRequest = { picked = null }, containerColor = CSurf,
+            title = { Text(m.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = { Text(formatSize(m.size), color = CDim) },
+            confirmButton = {
+                Row {
+                    TextButton(onClick = { LinkClient.pullMedia(ctx, kind, m.id, autoOpen = true); picked = null }) { Text("فتح") }
+                    TextButton(onClick = { LinkClient.pullMedia(ctx, kind, m.id, autoOpen = false); picked = null }) { Text("سحب بس") }
+                    TextButton(onClick = {
+                        val id = m.id; picked = null
+                        scope.launch {
+                            try { LinkClient.deleteMedia(kind, id); deletedIds = deletedIds + id }
+                            catch (e: Exception) { deleteMsg = e.message }
+                        }
+                    }) { Text("حذف", color = CRed) }
+                }
+            },
+            dismissButton = { TextButton(onClick = { picked = null }) { Text("إلغاء") } }
+        )
+    }
+    deleteMsg?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { deleteMsg = null }, containerColor = CSurf,
+            title = { Text("تعذر الحذف", color = Color.White) },
+            text = { Text(msg, color = CDim) },
+            confirmButton = { TextButton(onClick = { deleteMsg = null }) { Text("حسناً") } }
         )
     }
 }
@@ -791,15 +825,19 @@ fun FileRow(title: String, sub: String, icon: androidx.compose.ui.graphics.vecto
 @Composable
 fun FilesTab() {
     val ctx = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var path by remember { mutableStateOf("") }
     var root by remember { mutableStateOf<String?>(null) }
     var cur by remember { mutableStateOf<String?>(null) }
     var items by remember { mutableStateOf<List<RemoteFile>?>(null) }
     var err by remember { mutableStateOf<String?>(null) }
     val completed by LinkClient.completed.collectAsState()
+    var picked by remember { mutableStateOf<RemoteFile?>(null) }
+    var deleteMsg by remember { mutableStateOf<String?>(null) }
+    var deletedNames by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     LaunchedEffect(path) {
-        items = null; err = null
+        items = null; err = null; deletedNames = emptySet()
         try {
             val (p, l) = LinkClient.listDir(path)
             cur = p
@@ -810,7 +848,7 @@ fun FilesTab() {
     val c = cur
     BackHandler(enabled = c != null && c != root) { path = File(c!!).parent ?: "" }
 
-    val list = items
+    val list = items?.filter { it.name !in deletedNames }
     val e = err
     when {
         e != null -> Msg(e)
@@ -823,9 +861,40 @@ fun FilesTab() {
             items(list, key = { it.name }) { f ->
                 val full = (c ?: "") + "/" + f.name
                 if (f.isDir) FileRow(f.name, "مجلد", Icons.Rounded.Folder, false) { path = full }
-                else FileRow(f.name, formatSize(f.size), Icons.Rounded.InsertDriveFile, "f:$full" in completed) { LinkClient.pullFile(ctx, full, autoOpen = true) }
+                else FileRow(f.name, formatSize(f.size), Icons.Rounded.InsertDriveFile, "f:$full" in completed) { picked = f }
             }
         }
+    }
+
+    picked?.let { f ->
+        val full = (cur ?: "") + "/" + f.name
+        AlertDialog(
+            onDismissRequest = { picked = null }, containerColor = CSurf,
+            title = { Text(f.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = { Text(formatSize(f.size), color = CDim) },
+            confirmButton = {
+                Row {
+                    TextButton(onClick = { LinkClient.pullFile(ctx, full, autoOpen = true); picked = null }) { Text("فتح") }
+                    TextButton(onClick = { LinkClient.pullFile(ctx, full, autoOpen = false); picked = null }) { Text("سحب بس") }
+                    TextButton(onClick = {
+                        val name = f.name; picked = null
+                        scope.launch {
+                            try { LinkClient.deleteFile(full); deletedNames = deletedNames + name }
+                            catch (e: Exception) { deleteMsg = e.message }
+                        }
+                    }) { Text("حذف", color = CRed) }
+                }
+            },
+            dismissButton = { TextButton(onClick = { picked = null }) { Text("إلغاء") } }
+        )
+    }
+    deleteMsg?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { deleteMsg = null }, containerColor = CSurf,
+            title = { Text("تعذر الحذف", color = Color.White) },
+            text = { Text(msg, color = CDim) },
+            confirmButton = { TextButton(onClick = { deleteMsg = null }) { Text("حسناً") } }
+        )
     }
 }
 

@@ -7,3 +7,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "BluetoothLink"
 include(":app")
+include(":lite")

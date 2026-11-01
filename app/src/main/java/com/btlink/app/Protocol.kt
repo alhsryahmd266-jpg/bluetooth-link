@@ -18,6 +18,8 @@ object P {
     const val APP_LAUNCH = 12
     const val APP_UNINSTALL = 13
     const val CONTACTS_LIST = 14
+    const val DELETE_MEDIA = 15
+    const val DELETE_FILE = 16
     const val UPGRADE = 8
     const val BYE = 9
     const val OK = 0

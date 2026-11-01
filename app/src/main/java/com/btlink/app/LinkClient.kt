@@ -358,6 +358,16 @@ object LinkClient {
         if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
     }
 
+    suspend fun deleteMedia(kind: Int, id: Long) = call { i, o ->
+        o.writeInt(P.DELETE_MEDIA); o.writeInt(kind); o.writeLong(id); o.flush()
+        if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
+    }
+
+    suspend fun deleteFile(path: String) = call { i, o ->
+        o.writeInt(P.DELETE_FILE); o.writeUTF(path); o.flush()
+        if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
+    }
+
     suspend fun uninstallApp(pkg: String) = call { i, o ->
         o.writeInt(P.APP_UNINSTALL); o.writeUTF(pkg); o.flush()
         if (i.readInt() != P.OK) throw RemoteError(i.readUTF())
