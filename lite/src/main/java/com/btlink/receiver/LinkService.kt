@@ -511,10 +511,11 @@ class LinkService : Service() {
         cleanupWifi()
         val wp = getSystemService(WifiP2pManager::class.java)
         if (wp == null) { err(out, "الواي فاي دايركت غير مدعوم على الهاتف المستقبل"); return }
+        val prefs = getSharedPreferences("btlink", MODE_PRIVATE)
         val chars = "abcdefghjkmnpqrstuvwxyz23456789"
         fun rnd(n: Int) = (1..n).map { chars.random() }.joinToString("")
-        val ssid = "DIRECT-bl-" + rnd(5)
-        val pass = rnd(12)
+        val ssid = prefs.getString("turbo_ssid", null) ?: ("DIRECT-bl-" + rnd(5)).also { prefs.edit().putString("turbo_ssid", it).apply() }
+        val pass = prefs.getString("turbo_pass", null) ?: rnd(12).also { prefs.edit().putString("turbo_pass", it).apply() }
         var ok = false
         try {
             val ch = p2pCh ?: wp.initialize(this, Looper.getMainLooper(), null).also { p2pCh = it }
